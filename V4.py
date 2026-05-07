@@ -6,7 +6,7 @@ from datetime import datetime
 # --- 全局配置 ---
 ACTUAL_DATA_FILE = 'actual_data.csv'
 THEORY_DATA_FILE = 'theory_data.csv'
-OPTICS_INFO_FILE = 'optics_info.csv'          # 新增：光机信息文件
+OPTICS_INFO_FILE = 'optics_info.csv'
 
 # --- 核心枚举定义 ---
 STAGE_OPTIONS = ["EVT", "DVT", "PVT", "MP"]
@@ -21,14 +21,14 @@ SOURCE_OPTIONS = ["研发测试", "产线测试", "认证机构", "理论评估"
 COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温", "duty", "对比度", "色域"]
 ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image"]
 FILTER_FIELDS = ["机型", "阶段", "模式", "数据来源"]
-
-# 新增：光机信息字段
 OPTICS_FIELDS = ["机型", "DMD型号", "灯的型号（颗数）", "风扇型号", "DMD温度（包含余量）", "记录时间"]
 
+# --- 默认密码 ---
+ACTUAL_PASSWORD = "Aa123456"
+THEORY_PASSWORD = "Aa654321"
 
-# --- 工具函数（已有）---
+# --- 工具函数 ---
 def load_data(file_path):
-    """读取CSV，如果不存在则返回空DataFrame"""
     if os.path.exists(file_path):
         try:
             df = pd.read_csv(file_path)
@@ -40,18 +40,14 @@ def load_data(file_path):
             return pd.DataFrame()
     return pd.DataFrame()
 
-
 def save_data(df, file_path):
-    """保存DataFrame到CSV，保留5位小数"""
     df_to_save = df.copy()
     for col in COMMON_FIELDS:
         if col in df_to_save.columns:
             df_to_save[col] = pd.to_numeric(df_to_save[col], errors='coerce').round(5)
     df_to_save.to_csv(file_path, index=False, float_format='%.5f')
 
-
 def get_data_with_source():
-    """加载数据并打上正确的来源标签"""
     df_actual = load_data(ACTUAL_DATA_FILE)
     if not df_actual.empty:
         if '数据来源' not in df_actual.columns:
@@ -77,14 +73,10 @@ def get_data_with_source():
     df_all = df_all.fillna("")
     return df_all
 
-
-# --- 新增：光机信息专用函数 ---
 def load_optics_data():
-    """读取光机信息CSV，如果不存在则返回空DataFrame（含正确列）"""
     if os.path.exists(OPTICS_INFO_FILE):
         try:
             df = pd.read_csv(OPTICS_INFO_FILE)
-            # 确保所有字段都存在
             for col in OPTICS_FIELDS:
                 if col not in df.columns:
                     df[col] = ""
@@ -94,22 +86,18 @@ def load_optics_data():
     else:
         return pd.DataFrame(columns=OPTICS_FIELDS)
 
-
 def save_optics_data(df):
-    """保存光机信息DataFrame到CSV"""
-    # 只保留定义的字段，按顺序
     df_to_save = df[OPTICS_FIELDS].copy()
     df_to_save.to_csv(OPTICS_INFO_FILE, index=False)
-
 
 # --- 初始化 Session State ---
 def initialize_session_state():
     if 'filter_groups' not in st.session_state:
         st.session_state.filter_groups = [{'id': 0}]
-    if 'actual_data_submitted' not in st.session_state:
-        st.session_state.actual_data_submitted = False
-    if 'theory_data_submitted' not in st.session_state:
-        st.session_state.theory_data_submitted = False
+    if 'actual_authenticated' not in st.session_state:
+        st.session_state.actual_authenticated = False
+    if 'theory_authenticated' not in st.session_state:
+        st.session_state.theory_authenticated = False
 
 initialize_session_state()
 
@@ -117,15 +105,31 @@ initialize_session_state()
 st.set_page_config(layout="wide", page_title="光学数据管理系统")
 st.title("📊 光学数据管理系统")
 
-# 创建4个标签页
 tab1, tab2, tab3, tab4 = st.tabs(["【录入】实测数据", "【录入】理论数据", "【查询】数据分析", "【查询】光机信息"])
 
 # ==========================================
-# 实测数据录入（保持不变）
+# 实测数据录入（带密码验证）
 # ==========================================
 with tab1:
     st.header("实测数据录入")
 
+    # 密码验证
+    if not st.session_state.actual_authenticated:
+        st.warning("请输入密码以查看和操作实测数据")
+        with st.form("actual_auth_form"):
+            pwd = st.text_input("密码", type="password")
+            submit_auth = st.form_submit_button("验证")
+            if submit_auth:
+                if pwd == ACTUAL_PASSWORD:
+                    st.session_state.actual_authenticated = True
+                    st.success("验证成功！")
+                    st.rerun()
+                else:
+                    st.error("密码错误")
+        # 未验证时，不显示后续内容
+        st.stop()
+    
+    # 已验证：显示完整内容
     with st.form(key='actual_form', clear_on_submit=True):
         st.subheader("1. 基础信息")
         col1, col2, col3, col4 = st.columns(4)
@@ -217,12 +221,25 @@ with tab1:
     else:
         st.info("暂无实测历史数据")
 
-
 # ==========================================
-# 理论数据录入（保持不变，已删除数据来源选择）
+# 理论数据录入（带密码验证）
 # ==========================================
 with tab2:
     st.header("理论数据录入")
+
+    if not st.session_state.theory_authenticated:
+        st.warning("请输入密码以查看和操作理论数据")
+        with st.form("theory_auth_form"):
+            pwd = st.text_input("密码", type="password")
+            submit_auth = st.form_submit_button("验证")
+            if submit_auth:
+                if pwd == THEORY_PASSWORD:
+                    st.session_state.theory_authenticated = True
+                    st.success("验证成功！")
+                    st.rerun()
+                else:
+                    st.error("密码错误")
+        st.stop()
 
     with st.form(key='theory_form', clear_on_submit=True):
         st.subheader("1. 基础信息")
@@ -307,9 +324,8 @@ with tab2:
     else:
         st.info("暂无理论历史数据")
 
-
 # ==========================================
-# 数据查询与分析（保持不变）
+# 数据查询与分析（无密码）
 # ==========================================
 with tab3:
     st.header("数据查询与分析")
@@ -377,23 +393,17 @@ with tab3:
                         )
                 st.dataframe(display_final_df, use_container_width=True)
 
-
 # ==========================================
-# 新增：光机信息查询与管理
+# 光机信息查询（无密码）
 # ==========================================
 with tab4:
     st.header("光机信息查询")
-
     st.markdown("此表格用于记录各机型的光机相关信息，支持添加、编辑、删除操作。")
     
-    # 加载现有数据
     df_optics = load_optics_data()
-    
-    # 如果数据为空，显示空的 DataFrame（但 data_editor 允许添加行）
-    # 使用 data_editor 让用户直接编辑，包括添加新行（通过 num_rows="dynamic"）
     edited_optics = st.data_editor(
         df_optics,
-        num_rows="dynamic",          # 允许动态增删行
+        num_rows="dynamic",
         use_container_width=True,
         key="optics_editor",
         column_config={
@@ -406,14 +416,10 @@ with tab4:
         }
     )
     
-    # 保存按钮
     if st.button("💾 保存光机信息", key="save_optics"):
-        # 去除全空的行（用户可能添加了空行）
         edited_optics_clean = edited_optics.dropna(how='all').reset_index(drop=True)
-        # 如果机型为空的行可以删除（可选），我们不删除，让用户自行管理
         save_optics_data(edited_optics_clean)
         st.success("光机信息已保存！")
         st.rerun()
     
-    # 可选：显示一条提示
     st.caption("提示：在表格最后一行下方点击“+”可添加新行，勾选行前面的复选框后点击上方出现的“删除”按钮可删除行。")
