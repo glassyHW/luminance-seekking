@@ -1,0 +1,10 @@
+机型,阶段,模式,数据来源
+Model_A,EVT,三段AI,研发测试
+Model_B,DVT,三段运动,产线测试
+Model_C,PVT,三段filmmaker,认证机构
+,MP,三段电影,
+,,五段AI,
+,,五段filmmaker,
+,,五段电影,
+,,性能,
+,,overlap,
