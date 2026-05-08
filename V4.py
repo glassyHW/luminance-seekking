@@ -1,7 +1,7 @@
+#---V4.2修改查询界面需要依次输入录入界面密码才能使用bug，2025/05/08
 import streamlit as st
 import pandas as pd
 import os
-from datetime import datetime
 
 # --- 全局配置 ---
 ACTUAL_DATA_FILE = 'actual_data.csv'
@@ -20,7 +20,6 @@ SOURCE_OPTIONS = ["研发测试", "产线测试", "认证机构", "理论评估"
 # --- 字段定义 ---
 COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温", "duty", "对比度", "色域"]
 ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image"]
-FILTER_FIELDS = ["机型", "阶段", "模式", "数据来源"]
 OPTICS_FIELDS = ["机型", "DMD型号", "灯的型号（颗数）", "风扇型号", "DMD温度（包含余量）", "记录时间"]
 
 # --- 默认密码 ---
@@ -108,12 +107,11 @@ st.title("📊 光学数据管理系统")
 tab1, tab2, tab3, tab4 = st.tabs(["【录入】实测数据", "【录入】理论数据", "【查询】数据分析", "【查询】光机信息"])
 
 # ==========================================
-# 实测数据录入（带密码验证）
+# 实测数据录入（独立密码验证，不使用 st.stop()）
 # ==========================================
 with tab1:
     st.header("实测数据录入")
 
-    # 密码验证
     if not st.session_state.actual_authenticated:
         st.warning("请输入密码以查看和操作实测数据")
         with st.form("actual_auth_form"):
@@ -122,107 +120,105 @@ with tab1:
             if submit_auth:
                 if pwd == ACTUAL_PASSWORD:
                     st.session_state.actual_authenticated = True
-                    st.success("验证成功！")
                     st.rerun()
                 else:
                     st.error("密码错误")
-        # 未验证时，不显示后续内容
-        st.stop()
-    
-    # 已验证：显示完整内容
-    with st.form(key='actual_form', clear_on_submit=True):
-        st.subheader("1. 基础信息")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            input_model = st.text_input("机型", value="宝莱坞")
-        with col2:
-            input_stage = st.selectbox("阶段", STAGE_OPTIONS, index=0)
-        with col3:
-            input_mode = st.selectbox("模式", MODE_OPTIONS, index=0)
-        with col4:
-            input_source = st.selectbox("数据来源", ["研发测试", "产线测试", "认证机构"], index=0)
-
-        st.subheader("2. 光学参数")
-        cols = st.columns(len(COMMON_FIELDS))
-        input_values = {}
-        for i, field in enumerate(COMMON_FIELDS):
-            with cols[i]:
-                default_val = 0.0
-                if field == "亮度":
-                    default_val = 100.0
-                elif field == "色点x":
-                    default_val = 0.26
-                elif field == "色点y":
-                    default_val = 0.27
-                elif field == "色温":
-                    default_val = 6500.0
-                elif field == "Duv":
-                    default_val = 0.003
-                elif field == "SSI":
-                    default_val = 85.0
-                elif field == "灯温":
-                    default_val = 6500.0
-                elif field == "duty":
-                    default_val = 50.0
-                elif field == "对比度":
-                    default_val = 1000.0
-                elif field == "色域":
-                    default_val = 100.0
-                input_values[field] = st.number_input(field, value=default_val, format="%.5f", step=0.00001)
-
-        st.subheader("3. 附加信息")
-        cols_extra = st.columns(len(ACTUAL_EXTRA_FIELDS))
-        input_extras = {}
-        for i, field in enumerate(ACTUAL_EXTRA_FIELDS):
-            with cols_extra[i]:
-                input_extras[field] = st.text_input(field)
-
-        submitted = st.form_submit_button("保存实测数据")
-        if submitted:
-            new_data = {
-                "机型": input_model,
-                "阶段": input_stage,
-                "模式": input_mode,
-                "数据来源": input_source,
-                "实测/理论": "实测",
-            }
-            new_data.update(input_values)
-            new_data.update(input_extras)
-            df = load_data(ACTUAL_DATA_FILE)
-            if df.empty:
-                df = pd.DataFrame([new_data])
-            else:
-                for k in new_data.keys():
-                    if k not in df.columns:
-                        df[k] = ""
-                df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-            save_data(df, ACTUAL_DATA_FILE)
-            st.success("✅ 实测数据保存成功！")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("📜 实测历史数据管理")
-    df_actual = load_data(ACTUAL_DATA_FILE)
-    if not df_actual.empty:
-        if '数据来源' not in df_actual.columns:
-            df_actual['数据来源'] = '研发测试'
-        display_df = df_actual.copy()
-        for col in COMMON_FIELDS:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(lambda x: f'{x:.5f}' if pd.notna(x) and x != '' else x)
-        edited_df = st.data_editor(display_df, num_rows="dynamic", key="editor_actual", use_container_width=True)
-        if st.button("💾 保存实测表格修改", key="save_actual_edit"):
-            for col in COMMON_FIELDS:
-                if col in edited_df.columns:
-                    edited_df[col] = pd.to_numeric(edited_df[col], errors='coerce')
-            save_data(edited_df, ACTUAL_DATA_FILE)
-            st.success("实测历史数据已更新")
-            st.rerun()
+        # 未认证时，不显示正文内容，但代码继续执行（不会 stop）
     else:
-        st.info("暂无实测历史数据")
+        # 已验证：显示完整内容（表单 + 历史管理）
+        with st.form(key='actual_form', clear_on_submit=True):
+            st.subheader("1. 基础信息")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                input_model = st.text_input("机型", value="宝莱坞")
+            with col2:
+                input_stage = st.selectbox("阶段", STAGE_OPTIONS, index=0)
+            with col3:
+                input_mode = st.selectbox("模式", MODE_OPTIONS, index=0)
+            with col4:
+                input_source = st.selectbox("数据来源", ["研发测试", "产线测试", "认证机构"], index=0)
+
+            st.subheader("2. 光学参数")
+            cols = st.columns(len(COMMON_FIELDS))
+            input_values = {}
+            for i, field in enumerate(COMMON_FIELDS):
+                with cols[i]:
+                    default_val = 0.0
+                    if field == "亮度":
+                        default_val = 100.0
+                    elif field == "色点x":
+                        default_val = 0.26
+                    elif field == "色点y":
+                        default_val = 0.27
+                    elif field == "色温":
+                        default_val = 6500.0
+                    elif field == "Duv":
+                        default_val = 0.003
+                    elif field == "SSI":
+                        default_val = 85.0
+                    elif field == "灯温":
+                        default_val = 6500.0
+                    elif field == "duty":
+                        default_val = 50.0
+                    elif field == "对比度":
+                        default_val = 1000.0
+                    elif field == "色域":
+                        default_val = 100.0
+                    input_values[field] = st.number_input(field, value=default_val, format="%.5f", step=0.00001)
+
+            st.subheader("3. 附加信息")
+            cols_extra = st.columns(len(ACTUAL_EXTRA_FIELDS))
+            input_extras = {}
+            for i, field in enumerate(ACTUAL_EXTRA_FIELDS):
+                with cols_extra[i]:
+                    input_extras[field] = st.text_input(field)
+
+            submitted = st.form_submit_button("保存实测数据")
+            if submitted:
+                new_data = {
+                    "机型": input_model,
+                    "阶段": input_stage,
+                    "模式": input_mode,
+                    "数据来源": input_source,
+                    "实测/理论": "实测",
+                }
+                new_data.update(input_values)
+                new_data.update(input_extras)
+                df = load_data(ACTUAL_DATA_FILE)
+                if df.empty:
+                    df = pd.DataFrame([new_data])
+                else:
+                    for k in new_data.keys():
+                        if k not in df.columns:
+                            df[k] = ""
+                    df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
+                save_data(df, ACTUAL_DATA_FILE)
+                st.success("✅ 实测数据保存成功！")
+                st.rerun()
+
+        st.markdown("---")
+        st.subheader("📜 实测历史数据管理")
+        df_actual = load_data(ACTUAL_DATA_FILE)
+        if not df_actual.empty:
+            if '数据来源' not in df_actual.columns:
+                df_actual['数据来源'] = '研发测试'
+            display_df = df_actual.copy()
+            for col in COMMON_FIELDS:
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].apply(lambda x: f'{x:.5f}' if pd.notna(x) and x != '' else x)
+            edited_df = st.data_editor(display_df, num_rows="dynamic", key="editor_actual", use_container_width=True)
+            if st.button("💾 保存实测表格修改", key="save_actual_edit"):
+                for col in COMMON_FIELDS:
+                    if col in edited_df.columns:
+                        edited_df[col] = pd.to_numeric(edited_df[col], errors='coerce')
+                save_data(edited_df, ACTUAL_DATA_FILE)
+                st.success("实测历史数据已更新")
+                st.rerun()
+        else:
+            st.info("暂无实测历史数据")
 
 # ==========================================
-# 理论数据录入（带密码验证）
+# 理论数据录入（独立密码验证）
 # ==========================================
 with tab2:
     st.header("理论数据录入")
@@ -235,97 +231,95 @@ with tab2:
             if submit_auth:
                 if pwd == THEORY_PASSWORD:
                     st.session_state.theory_authenticated = True
-                    st.success("验证成功！")
                     st.rerun()
                 else:
                     st.error("密码错误")
-        st.stop()
-
-    with st.form(key='theory_form', clear_on_submit=True):
-        st.subheader("1. 基础信息")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            input_model_t = st.text_input("机型", value="宝莱坞", key="t_model")
-        with col2:
-            input_stage_t = st.selectbox("阶段", STAGE_OPTIONS, index=0, key="t_stage")
-        with col3:
-            input_mode_t = st.selectbox("模式", MODE_OPTIONS, index=0, key="t_mode")
-        st.info("📌 理论数据的数据来源固定为：理论评估")
-
-        st.subheader("2. 光学参数")
-        cols = st.columns(len(COMMON_FIELDS))
-        input_values_t = {}
-        for i, field in enumerate(COMMON_FIELDS):
-            with cols[i]:
-                default_val = 0.0
-                if field == "亮度":
-                    default_val = 100.0
-                elif field == "色点x":
-                    default_val = 0.26
-                elif field == "色点y":
-                    default_val = 0.27
-                elif field == "色温":
-                    default_val = 6500.0
-                elif field == "Duv":
-                    default_val = 0.003
-                elif field == "SSI":
-                    default_val = 85.0
-                elif field == "灯温":
-                    default_val = 6500.0
-                elif field == "duty":
-                    default_val = 50.0
-                elif field == "对比度":
-                    default_val = 1000.0
-                elif field == "色域":
-                    default_val = 100.0
-                input_values_t[field] = st.number_input(field, value=default_val, format="%.5f", step=0.00001, key=f"t_{field}")
-
-        submitted_t = st.form_submit_button("保存理论数据")
-        if submitted_t:
-            new_data = {
-                "机型": input_model_t,
-                "阶段": input_stage_t,
-                "模式": input_mode_t,
-                "数据来源": "理论评估",
-                "实测/理论": "理论",
-            }
-            new_data.update(input_values_t)
-            for field in ACTUAL_EXTRA_FIELDS:
-                new_data[field] = ""
-            df = load_data(THEORY_DATA_FILE)
-            if df.empty:
-                df = pd.DataFrame([new_data])
-            else:
-                for k in new_data.keys():
-                    if k not in df.columns:
-                        df[k] = ""
-                df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-            save_data(df, THEORY_DATA_FILE)
-            st.success("✅ 理论数据保存成功！")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("📜 理论历史数据管理")
-    df_theory = load_data(THEORY_DATA_FILE)
-    if not df_theory.empty:
-        display_df_t = df_theory.copy()
-        for col in COMMON_FIELDS:
-            if col in display_df_t.columns:
-                display_df_t[col] = display_df_t[col].apply(lambda x: f'{x:.5f}' if pd.notna(x) and x != '' else x)
-        edited_df_t = st.data_editor(display_df_t, num_rows="dynamic", key="editor_theory", use_container_width=True)
-        if st.button("💾 保存理论表格修改", key="save_theory_edit"):
-            for col in COMMON_FIELDS:
-                if col in edited_df_t.columns:
-                    edited_df_t[col] = pd.to_numeric(edited_df_t[col], errors='coerce')
-            edited_df_t['数据来源'] = '理论评估'
-            save_data(edited_df_t, THEORY_DATA_FILE)
-            st.success("理论历史数据已更新")
-            st.rerun()
     else:
-        st.info("暂无理论历史数据")
+        with st.form(key='theory_form', clear_on_submit=True):
+            st.subheader("1. 基础信息")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                input_model_t = st.text_input("机型", value="宝莱坞", key="t_model")
+            with col2:
+                input_stage_t = st.selectbox("阶段", STAGE_OPTIONS, index=0, key="t_stage")
+            with col3:
+                input_mode_t = st.selectbox("模式", MODE_OPTIONS, index=0, key="t_mode")
+            st.info("📌 理论数据的数据来源固定为：理论评估")
+
+            st.subheader("2. 光学参数")
+            cols = st.columns(len(COMMON_FIELDS))
+            input_values_t = {}
+            for i, field in enumerate(COMMON_FIELDS):
+                with cols[i]:
+                    default_val = 0.0
+                    if field == "亮度":
+                        default_val = 100.0
+                    elif field == "色点x":
+                        default_val = 0.26
+                    elif field == "色点y":
+                        default_val = 0.27
+                    elif field == "色温":
+                        default_val = 6500.0
+                    elif field == "Duv":
+                        default_val = 0.003
+                    elif field == "SSI":
+                        default_val = 85.0
+                    elif field == "灯温":
+                        default_val = 6500.0
+                    elif field == "duty":
+                        default_val = 50.0
+                    elif field == "对比度":
+                        default_val = 1000.0
+                    elif field == "色域":
+                        default_val = 100.0
+                    input_values_t[field] = st.number_input(field, value=default_val, format="%.5f", step=0.00001, key=f"t_{field}")
+
+            submitted_t = st.form_submit_button("保存理论数据")
+            if submitted_t:
+                new_data = {
+                    "机型": input_model_t,
+                    "阶段": input_stage_t,
+                    "模式": input_mode_t,
+                    "数据来源": "理论评估",
+                    "实测/理论": "理论",
+                }
+                new_data.update(input_values_t)
+                for field in ACTUAL_EXTRA_FIELDS:
+                    new_data[field] = ""
+                df = load_data(THEORY_DATA_FILE)
+                if df.empty:
+                    df = pd.DataFrame([new_data])
+                else:
+                    for k in new_data.keys():
+                        if k not in df.columns:
+                            df[k] = ""
+                    df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
+                save_data(df, THEORY_DATA_FILE)
+                st.success("✅ 理论数据保存成功！")
+                st.rerun()
+
+        st.markdown("---")
+        st.subheader("📜 理论历史数据管理")
+        df_theory = load_data(THEORY_DATA_FILE)
+        if not df_theory.empty:
+            display_df_t = df_theory.copy()
+            for col in COMMON_FIELDS:
+                if col in display_df_t.columns:
+                    display_df_t[col] = display_df_t[col].apply(lambda x: f'{x:.5f}' if pd.notna(x) and x != '' else x)
+            edited_df_t = st.data_editor(display_df_t, num_rows="dynamic", key="editor_theory", use_container_width=True)
+            if st.button("💾 保存理论表格修改", key="save_theory_edit"):
+                for col in COMMON_FIELDS:
+                    if col in edited_df_t.columns:
+                        edited_df_t[col] = pd.to_numeric(edited_df_t[col], errors='coerce')
+                edited_df_t['数据来源'] = '理论评估'
+                save_data(edited_df_t, THEORY_DATA_FILE)
+                st.success("理论历史数据已更新")
+                st.rerun()
+        else:
+            st.info("暂无理论历史数据")
 
 # ==========================================
-# 数据查询与分析（无密码）
+# 数据查询与分析（完全公开，无任何密码检查）
 # ==========================================
 with tab3:
     st.header("数据查询与分析")
@@ -394,7 +388,7 @@ with tab3:
                 st.dataframe(display_final_df, use_container_width=True)
 
 # ==========================================
-# 光机信息查询（无密码）
+# 光机信息查询与管理（完全公开）
 # ==========================================
 with tab4:
     st.header("光机信息查询")
