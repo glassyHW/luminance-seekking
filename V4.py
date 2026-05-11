@@ -3,11 +3,15 @@ import streamlit as st
 import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+import json
 
 # ================== Google Sheets 配置 ==================
 SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-SHEET_NAME = '光学数据管理'          # Google Sheet 文件名
+
+# ⭐ 使用 Spreadsheet ID 而不是文件名（更稳定）
+SPREADSHEET_ID = '1JW1fQRYMts20yc4ctV8aZYzyhbb6wmLhEhMSH1EtIUU'   # 你的表格ID
+
+# 工作表名称（三个标签页的名字）
 WORKSHEET_ACTUAL = '实测数据'
 WORKSHEET_THEORY = '理论数据'
 WORKSHEET_OPTICS = '光机信息'
@@ -32,14 +36,16 @@ THEORY_PASSWORD = "Aa654321"
 @st.cache_resource
 def get_gs_client():
     """获取 Google Sheets 客户端（单例）"""
-    creds_dict = dict(st.secrets["gcp_service_account"])
+    # 从 secrets 中读取完整的 JSON 字符串
+    json_str = st.secrets["gcp_service_account_json"]
+    creds_dict = json.loads(json_str)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
     return gspread.authorize(creds)
 
 def get_worksheet(sheet_title):
-    """获取工作表对象"""
+    """获取工作表对象（通过 Spreadsheet ID）"""
     client = get_gs_client()
-    sh = client.open(SHEET_NAME)
+    sh = client.open_by_key(SPREADSHEET_ID)   # 关键修改：使用 ID 打开
     return sh.worksheet(sheet_title)
 
 def load_data_from_sheet(worksheet_name):
@@ -54,7 +60,6 @@ def load_data_from_sheet(worksheet_name):
                 df[col] = pd.to_numeric(df[col], errors='coerce').round(5)
         return df
     except Exception as e:
-        # 工作表可能没有数据或不存在
         return pd.DataFrame()
 
 def save_data_to_sheet(df, worksheet_name):
@@ -62,19 +67,14 @@ def save_data_to_sheet(df, worksheet_name):
     ws = get_worksheet(worksheet_name)
     ws.clear()
     if not df.empty:
-        # 更新数据：第一行列头，后面数据
         ws.update([df.columns.values.tolist()] + df.values.tolist())
     else:
-        # 空表只写列头
         ws.update([df.columns.tolist()])
 
 def init_sheets():
     """确保三个工作表存在且至少包含列头"""
-    # 实测数据列头
     actual_columns = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
-    # 理论数据列头
     theory_columns = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS
-    # 光机信息列头
     optics_columns = OPTICS_FIELDS
 
     for ws_name, cols in [(WORKSHEET_ACTUAL, actual_columns),
@@ -82,13 +82,12 @@ def init_sheets():
                           (WORKSHEET_OPTICS, optics_columns)]:
         try:
             ws = get_worksheet(ws_name)
-            # 如果工作表为空（完全没有数据），则写入列头
             if not ws.get_all_values():
                 ws.update([cols])
         except gspread.exceptions.WorksheetNotFound:
             # 工作表不存在，创建
             client = get_gs_client()
-            sh = client.open(SHEET_NAME)
+            sh = client.open_by_key(SPREADSHEET_ID)
             sh.add_worksheet(title=ws_name, rows=1, cols=len(cols))
             ws = sh.worksheet(ws_name)
             ws.update([cols])
@@ -220,7 +219,6 @@ def main():
                     if df.empty:
                         df = pd.DataFrame([new_data])
                     else:
-                        # 确保列对齐
                         for k in new_data.keys():
                             if k not in df.columns:
                                 df[k] = ""
