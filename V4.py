@@ -1,4 +1,5 @@
 # --- V4.3把数据从github迁移到google
+import json
 import streamlit as st
 import pandas as pd
 import gspread
@@ -34,17 +35,43 @@ THEORY_PASSWORD = "Aa654321"
 
 # ================== Google Sheets 交互函数 ==================
 @st.cache_resource
+@st.cache_resource
 def get_gs_client():
-    # 直接从 secrets 中获取字典（TOML 已解析）
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-    return gspread.authorize(creds)
+    """获取 Google Sheets 客户端（单例）"""
+    try:
+        # 从 secrets 中读取完整的 JSON 字符串
+        json_str = st.secrets["gcp_service_account_json"]
+        # 调试：打印 JSON 的前200字符（页面上可见）
+        st.write("🔍 JSON 前200字符:", json_str[:200])
+        
+        creds_dict = json.loads(json_str)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error(f"❌ get_gs_client 失败: {e}")
+        st.exception(e)  # 打印完整异常堆栈
+        st.stop()
 
 def get_worksheet(sheet_title):
     """获取工作表对象（通过 Spreadsheet ID）"""
-    client = get_gs_client()
-    sh = client.open_by_key(SPREADSHEET_ID)   # 关键修改：使用 ID 打开
-    return sh.worksheet(sheet_title)
+    try:
+        client = get_gs_client()
+        st.write(f"🔍 尝试打开表格 ID: {SPREADSHEET_ID}")
+        sh = client.open_by_key(SPREADSHEET_ID)
+        st.success("✅ 表格打开成功")
+        return sh.worksheet(sheet_title)
+    except gspread.exceptions.APIError as e:
+        st.error(f"❌ API 错误: {e}")
+        st.write("请检查：")
+        st.write("1. 服务账号是否已添加为该表格的编辑者（共享权限）")
+        st.write("2. Google Sheets API 和 Drive API 是否已启用")
+        st.write("3. 表格 ID 是否正确")
+        st.exception(e)
+        st.stop()
+    except Exception as e:
+        st.error(f"❌ 其他错误: {e}")
+        st.exception(e)
+        st.stop()
 
 def load_data_from_sheet(worksheet_name):
     """从工作表读取数据为 DataFrame"""
@@ -79,17 +106,25 @@ def init_sheets():
                           (WORKSHEET_THEORY, theory_columns),
                           (WORKSHEET_OPTICS, optics_columns)]:
         try:
+            st.write(f"🔍 正在检查工作表: {ws_name}")
             ws = get_worksheet(ws_name)
             if not ws.get_all_values():
+                st.write(f"📝 工作表 {ws_name} 为空，写入表头...")
                 ws.update([cols])
+            else:
+                st.write(f"✅ 工作表 {ws_name} 已有数据")
         except gspread.exceptions.WorksheetNotFound:
-            # 工作表不存在，创建
+            st.write(f"⚠️ 工作表 {ws_name} 不存在，正在创建...")
             client = get_gs_client()
             sh = client.open_by_key(SPREADSHEET_ID)
             sh.add_worksheet(title=ws_name, rows=1, cols=len(cols))
             ws = sh.worksheet(ws_name)
             ws.update([cols])
-
+            st.success(f"✅ 工作表 {ws_name} 创建成功")
+        except Exception as e:
+            st.error(f"❌ 处理工作表 {ws_name} 时出错: {e}")
+            st.exception(e)
+            st.stop()
 # ================== 业务数据函数 ==================
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL)
