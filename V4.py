@@ -35,10 +35,8 @@ THEORY_PASSWORD = "Aa654321"
 # ================== Google Sheets 交互函数 ==================
 @st.cache_resource
 def get_gs_client():
-    """获取 Google Sheets 客户端（单例）"""
-    # 从 secrets 中读取完整的 JSON 字符串
-    json_str = st.secrets["gcp_service_account_json"]
-    creds_dict = json.loads(json_str)
+    # 直接从 secrets 中获取字典（TOML 已解析）
+    creds_dict = dict(st.secrets["gcp_service_account"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
     return gspread.authorize(creds)
 
