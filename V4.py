@@ -4,19 +4,15 @@ import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
-import json
 
-# --- 全局配置 ---
-# Google Sheets 配置（从 st.secrets 读取）
+# ================== Google Sheets 配置 ==================
 SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-
-# 工作表名称
-SHEET_NAME = '光学数据管理'  # Google Sheet 的文件名
+SHEET_NAME = '光学数据管理'          # Google Sheet 文件名
 WORKSHEET_ACTUAL = '实测数据'
 WORKSHEET_THEORY = '理论数据'
 WORKSHEET_OPTICS = '光机信息'
 
-# --- 核心枚举定义 ---
+# ================== 全局常量 ==================
 STAGE_OPTIONS = ["EVT", "DVT", "PVT", "MP"]
 MODE_OPTIONS = [
     "三段AI", "三段运动", "三段filmmaker", "三段电影",
@@ -24,94 +20,80 @@ MODE_OPTIONS = [
     "性能", "overlap"
 ]
 SOURCE_OPTIONS = ["研发测试", "产线测试", "认证机构", "理论评估"]
-
-# --- 字段定义 ---
 COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温", "duty", "对比度", "色域"]
 ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image"]
 OPTICS_FIELDS = ["机型", "DMD型号", "灯的型号（颗数）", "风扇型号", "DMD温度（包含余量）", "记录时间"]
 
-# --- 默认密码 ---
+# 密码
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
 
 # ================== Google Sheets 交互函数 ==================
-def get_worksheet(sheet_title):
-    """获取指定工作表对象"""
-    # 从 st.secrets 读取服务账号信息
+@st.cache_resource
+def get_gs_client():
+    """获取 Google Sheets 客户端（单例）"""
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-    client = gspread.authorize(creds)
-    sheet = client.open(SHEET_NAME).worksheet(sheet_title)
-    return sheet
+    return gspread.authorize(creds)
 
-def load_data_from_sheet(sheet_title):
-    """从 Google Sheets 工作表加载数据为 DataFrame"""
+def get_worksheet(sheet_title):
+    """获取工作表对象"""
+    client = get_gs_client()
+    sh = client.open(SHEET_NAME)
+    return sh.worksheet(sheet_title)
+
+def load_data_from_sheet(worksheet_name):
+    """从工作表读取数据为 DataFrame"""
     try:
-        worksheet = get_worksheet(sheet_title)
-        records = worksheet.get_all_records()
+        ws = get_worksheet(worksheet_name)
+        records = ws.get_all_records()
         df = pd.DataFrame(records)
-        # 数值列转换（仅对 COMMON_FIELDS）
+        # 数值列转换
         for col in COMMON_FIELDS:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').round(5)
         return df
     except Exception as e:
-        # 如果工作表不存在或为空，返回空DataFrame（但后续初始化会创建）
-        st.warning(f"加载工作表 {sheet_title} 时出错: {e}")
+        # 工作表可能没有数据或不存在
         return pd.DataFrame()
 
-def save_data_to_sheet(df, sheet_title):
-    """将 DataFrame 完全覆盖写入 Google Sheets 工作表"""
-    worksheet = get_worksheet(sheet_title)
-    worksheet.clear()
+def save_data_to_sheet(df, worksheet_name):
+    """将 DataFrame 完全覆盖写入工作表"""
+    ws = get_worksheet(worksheet_name)
+    ws.clear()
     if not df.empty:
-        # 更新数据：第一行是列名，后面是数据
-        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+        # 更新数据：第一行列头，后面数据
+        ws.update([df.columns.values.tolist()] + df.values.tolist())
     else:
-        # 空表只写入列名
-        worksheet.update([df.columns.tolist()])
+        # 空表只写列头
+        ws.update([df.columns.tolist()])
 
 def init_sheets():
-    """初始化三个工作表（如果不存在则创建，并写入列头）"""
-    # 1. 实测数据列
+    """确保三个工作表存在且至少包含列头"""
+    # 实测数据列头
     actual_columns = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
-    df_actual = pd.DataFrame(columns=actual_columns)
-    # 2. 理论数据列
+    # 理论数据列头
     theory_columns = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS
-    df_theory = pd.DataFrame(columns=theory_columns)
-    # 3. 光机信息列
-    df_optics = pd.DataFrame(columns=OPTICS_FIELDS)
+    # 光机信息列头
+    optics_columns = OPTICS_FIELDS
 
-    try:
-        # 尝试获取工作表，如果不存在则创建
-        sheet = get_worksheet(WORKSHEET_ACTUAL)
-    except gspread.exceptions.WorksheetNotFound:
-        # 创建新工作表并写入列头
-        client = get_worksheet(WORKSHEET_ACTUAL).client  # 通过已有方法获取client有点绕，简化：
-        # 更直接的方式：从 sheet 对象获取 client 不太方便，我们重新写一个初始化专用函数
-        pass
-
-    # 为了避免重复代码，统一处理：尝试加载，如果出错则创建并写入表头
-    for ws_name, columns in [
-        (WORKSHEET_ACTUAL, actual_columns),
-        (WORKSHEET_THEORY, theory_columns),
-        (WORKSHEET_OPTICS, OPTICS_FIELDS)
-    ]:
+    for ws_name, cols in [(WORKSHEET_ACTUAL, actual_columns),
+                          (WORKSHEET_THEORY, theory_columns),
+                          (WORKSHEET_OPTICS, optics_columns)]:
         try:
-            get_worksheet(ws_name)
+            ws = get_worksheet(ws_name)
+            # 如果工作表为空（完全没有数据），则写入列头
+            if not ws.get_all_values():
+                ws.update([cols])
         except gspread.exceptions.WorksheetNotFound:
-            # 创建新工作表
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-            client = gspread.authorize(creds)
+            # 工作表不存在，创建
+            client = get_gs_client()
             sh = client.open(SHEET_NAME)
-            ws = sh.add_worksheet(title=ws_name, rows=1, cols=len(columns))
-            # 写入列头
-            ws.update([columns])
-        except Exception as e:
-            st.error(f"初始化工作表 {ws_name} 失败: {e}")
+            sh.add_worksheet(title=ws_name, rows=1, cols=len(cols))
+            ws = sh.worksheet(ws_name)
+            ws.update([cols])
 
-# ================== 原有的数据加载函数（适配 Google Sheets） ==================
+# ================== 业务数据函数 ==================
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL)
 
@@ -131,20 +113,19 @@ def save_optics_data(df):
     save_data_to_sheet(df, WORKSHEET_OPTICS)
 
 def get_data_with_source():
-    """加载合并后的数据（用于查询）"""
+    """合并实测和理论数据用于查询"""
     df_actual = load_actual_data()
-    if not df_actual.empty and '实测/理论' not in df_actual.columns:
+    if not df_actual.empty:
         df_actual['实测/理论'] = '实测'
     df_theory = load_theory_data()
-    if not df_theory.empty and '实测/理论' not in df_theory.columns:
+    if not df_theory.empty:
         df_theory['实测/理论'] = '理论'
-    # 合并
     df_all = pd.concat([df_actual, df_theory], ignore_index=True, sort=False)
     df_all = df_all.fillna("")
     return df_all
 
-# ================== Session State 初始化 ==================
-def initialize_session_state():
+# ================== Session 状态初始化 ==================
+def init_session_state():
     if 'filter_groups' not in st.session_state:
         st.session_state.filter_groups = [{'id': 0}]
     if 'actual_authenticated' not in st.session_state:
@@ -156,23 +137,20 @@ def initialize_session_state():
 def main():
     st.set_page_config(layout="wide", page_title="光学数据管理系统")
     st.title("📊 光学数据管理系统")
-
-    initialize_session_state()
-
-    # 初始化 Google Sheets 工作表（确保三个工作表存在）
-    init_sheets()
+    init_session_state()
+    init_sheets()   # 确保工作表存在
 
     tab1, tab2, tab3, tab4 = st.tabs(["【录入】实测数据", "【录入】理论数据", "【查询】数据分析", "【查询】光机信息"])
 
-    # ---------- 实测数据录入 ----------
+    # ---------- 实测数据 ----------
     with tab1:
         st.header("实测数据录入")
         if not st.session_state.actual_authenticated:
             st.warning("请输入密码以查看和操作实测数据")
             with st.form("actual_auth_form"):
                 pwd = st.text_input("密码", type="password")
-                submit_auth = st.form_submit_button("验证")
-                if submit_auth:
+                submit = st.form_submit_button("验证")
+                if submit:
                     if pwd == ACTUAL_PASSWORD:
                         st.session_state.actual_authenticated = True
                         st.rerun()
@@ -242,7 +220,7 @@ def main():
                     if df.empty:
                         df = pd.DataFrame([new_data])
                     else:
-                        # 确保列齐全
+                        # 确保列对齐
                         for k in new_data.keys():
                             if k not in df.columns:
                                 df[k] = ""
@@ -272,15 +250,15 @@ def main():
             else:
                 st.info("暂无实测历史数据")
 
-    # ---------- 理论数据录入 ----------
+    # ---------- 理论数据 ----------
     with tab2:
         st.header("理论数据录入")
         if not st.session_state.theory_authenticated:
             st.warning("请输入密码以查看和操作理论数据")
             with st.form("theory_auth_form"):
                 pwd = st.text_input("密码", type="password")
-                submit_auth = st.form_submit_button("验证")
-                if submit_auth:
+                submit = st.form_submit_button("验证")
+                if submit:
                     if pwd == THEORY_PASSWORD:
                         st.session_state.theory_authenticated = True
                         st.rerun()
@@ -370,9 +348,10 @@ def main():
             else:
                 st.info("暂无理论历史数据")
 
-    # ---------- 数据查询与分析（公开） ----------
+    # ---------- 数据分析（公开）----------
     with tab3:
         st.header("数据查询与分析")
+
         with st.expander("筛选条件", expanded=True):
             if st.button("+ 添加筛选组"):
                 new_id = len(st.session_state.filter_groups)
@@ -436,7 +415,7 @@ def main():
                             )
                     st.dataframe(display_final_df, use_container_width=True)
 
-    # ---------- 光机信息查询（公开） ----------
+    # ---------- 光机信息（公开）----------
     with tab4:
         st.header("光机信息查询")
         st.markdown("此表格用于记录各机型的光机相关信息，支持添加、编辑、删除操作。")
@@ -461,6 +440,7 @@ def main():
             st.success("光机信息已保存！")
             st.rerun()
         st.caption("提示：在表格最后一行下方点击“+”可添加新行，勾选行前面的复选框后点击上方出现的“删除”按钮可删除行。")
+
 
 if __name__ == "__main__":
     main()
