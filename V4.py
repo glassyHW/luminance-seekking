@@ -474,9 +474,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main(st.write("🔍 当前 secrets 包含的顶层键：", list(st.secrets.keys()))
-if "gcp_service_account_json" in st.secrets:
-    st.success("✅ 找到 gcp_service_account_json 键！")
-else:
-    st.error("❌ 错误：在 st.secrets 中找不到 'gcp_service_account_json' 键！")
-    st.stop())
+    def main():
+    # 调试：检查 secrets 中的键
+    st.write("🔍 Secrets keys:", list(st.secrets.keys()))
+    if "gcp_service_account_json" in st.secrets:
+        st.success("✅ 找到 gcp_service_account_json 键！")
+    else:
+        st.error("❌ 在 st.secrets 中找不到 'gcp_service_account_json' 键！")
+        # 如果你想停止执行，可以加 st.stop()
+    
+    st.set_page_config(layout="wide", page_title="光学数据管理系统")
+    st.title("📊 光学数据管理系统")
+    # ... 其余代码
