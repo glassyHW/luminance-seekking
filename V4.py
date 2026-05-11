@@ -474,4 +474,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(st.write("🔍 当前 secrets 包含的顶层键：", list(st.secrets.keys()))
+if "gcp_service_account_json" in st.secrets:
+    st.success("✅ 找到 gcp_service_account_json 键！")
+else:
+    st.error("❌ 错误：在 st.secrets 中找不到 'gcp_service_account_json' 键！")
+    st.stop())
