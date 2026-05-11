@@ -1,16 +1,15 @@
-# --- V4.3把数据从github迁移到google
-import json
 import streamlit as st
 import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
+from datetime import datetime
 
 # ================== Google Sheets 配置 ==================
 SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 
-# ⭐ 使用 Spreadsheet ID 而不是文件名（更稳定）
-SPREADSHEET_ID = '1JW1fQRYMts20yc4ctV8aZYzyhbb6wmLhEhMSH1EtIUU'   # 你的表格ID
+# 你的表格 ID（请确认这个 ID 是正确的）
+SPREADSHEET_ID = '1JW1fQRYMts20yc4ctV8aZYzyhbb6wmLhEhMSH1EtIUU'
 
 # 工作表名称（三个标签页的名字）
 WORKSHEET_ACTUAL = '实测数据'
@@ -35,43 +34,19 @@ THEORY_PASSWORD = "Aa654321"
 
 # ================== Google Sheets 交互函数 ==================
 @st.cache_resource
-@st.cache_resource
 def get_gs_client():
-    """获取 Google Sheets 客户端（单例）"""
-    try:
-        # 从 secrets 中读取完整的 JSON 字符串
-        json_str = st.secrets["gcp_service_account_json"]
-        # 调试：打印 JSON 的前200字符（页面上可见）
-        st.write("🔍 JSON 前200字符:", json_str[:200])
-        
-        creds_dict = json.loads(json_str)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-        return gspread.authorize(creds)
-    except Exception as e:
-        st.error(f"❌ get_gs_client 失败: {e}")
-        st.exception(e)  # 打印完整异常堆栈
-        st.stop()
+    """获取 Google Sheets 客户端（从 secrets 中读取服务账号字典）"""
+    # 直接从 secrets 获取 section 对应的字典
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    # 使用字典创建凭证
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
+    return gspread.authorize(creds)
 
 def get_worksheet(sheet_title):
     """获取工作表对象（通过 Spreadsheet ID）"""
-    try:
-        client = get_gs_client()
-        st.write(f"🔍 尝试打开表格 ID: {SPREADSHEET_ID}")
-        sh = client.open_by_key(SPREADSHEET_ID)
-        st.success("✅ 表格打开成功")
-        return sh.worksheet(sheet_title)
-    except gspread.exceptions.APIError as e:
-        st.error(f"❌ API 错误: {e}")
-        st.write("请检查：")
-        st.write("1. 服务账号是否已添加为该表格的编辑者（共享权限）")
-        st.write("2. Google Sheets API 和 Drive API 是否已启用")
-        st.write("3. 表格 ID 是否正确")
-        st.exception(e)
-        st.stop()
-    except Exception as e:
-        st.error(f"❌ 其他错误: {e}")
-        st.exception(e)
-        st.stop()
+    client = get_gs_client()
+    sh = client.open_by_key(SPREADSHEET_ID)
+    return sh.worksheet(sheet_title)
 
 def load_data_from_sheet(worksheet_name):
     """从工作表读取数据为 DataFrame"""
@@ -85,6 +60,7 @@ def load_data_from_sheet(worksheet_name):
                 df[col] = pd.to_numeric(df[col], errors='coerce').round(5)
         return df
     except Exception as e:
+        # 如果工作表不存在或为空，返回空 DataFrame
         return pd.DataFrame()
 
 def save_data_to_sheet(df, worksheet_name):
@@ -92,7 +68,9 @@ def save_data_to_sheet(df, worksheet_name):
     ws = get_worksheet(worksheet_name)
     ws.clear()
     if not df.empty:
-        ws.update([df.columns.values.tolist()] + df.values.tolist())
+        # 将 NaN 转换为 None，避免 API 报错
+        df_clean = df.where(pd.notnull(df), None)
+        ws.update([df_clean.columns.values.tolist()] + df_clean.values.tolist())
     else:
         ws.update([df.columns.tolist()])
 
@@ -106,25 +84,19 @@ def init_sheets():
                           (WORKSHEET_THEORY, theory_columns),
                           (WORKSHEET_OPTICS, optics_columns)]:
         try:
-            st.write(f"🔍 正在检查工作表: {ws_name}")
             ws = get_worksheet(ws_name)
             if not ws.get_all_values():
-                st.write(f"📝 工作表 {ws_name} 为空，写入表头...")
                 ws.update([cols])
-            else:
-                st.write(f"✅ 工作表 {ws_name} 已有数据")
         except gspread.exceptions.WorksheetNotFound:
-            st.write(f"⚠️ 工作表 {ws_name} 不存在，正在创建...")
+            # 工作表不存在，创建
             client = get_gs_client()
             sh = client.open_by_key(SPREADSHEET_ID)
             sh.add_worksheet(title=ws_name, rows=1, cols=len(cols))
             ws = sh.worksheet(ws_name)
             ws.update([cols])
-            st.success(f"✅ 工作表 {ws_name} 创建成功")
         except Exception as e:
-            st.error(f"❌ 处理工作表 {ws_name} 时出错: {e}")
-            st.exception(e)
-            st.stop()
+            st.error(f"初始化工作表 {ws_name} 时出错: {e}")
+
 # ================== 业务数据函数 ==================
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL)
@@ -474,15 +446,4 @@ def main():
 
 
 if __name__ == "__main__":
-    def main():
-    # 调试：检查 secrets 中的键
-    st.write("🔍 Secrets keys:", list(st.secrets.keys()))
-    if "gcp_service_account_json" in st.secrets:
-        st.success("✅ 找到 gcp_service_account_json 键！")
-    else:
-        st.error("❌ 在 st.secrets 中找不到 'gcp_service_account_json' 键！")
-        # 如果你想停止执行，可以加 st.stop()
-    
-    st.set_page_config(layout="wide", page_title="光学数据管理系统")
-    st.title("📊 光学数据管理系统")
-    # ... 其余代码
+    main()
