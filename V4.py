@@ -11,10 +11,11 @@ SPREADSHEET_ID = '1JW1fQRYMts20yc4ctV8aZYzyhbb6wmLhEhMSH1EtIUU'
 WORKSHEET_ACTUAL = '实测数据'
 WORKSHEET_THEORY = '理论数据'
 WORKSHEET_OPTICS = '光机信息'
+WORKSHEET_MODES = '模式配置'          # 新增：存储动态模式选项
 
 # ================== 全局常量 ==================
 STAGE_OPTIONS = ["EVT", "DVT", "PVT", "MP"]
-MODE_OPTIONS = [
+DEFAULT_MODE_OPTIONS = [
     "三段AI", "三段运动", "三段filmmaker", "三段电影",
     "五段AI", "五段filmmaker", "五段电影",
     "性能", "overlap"
@@ -35,7 +36,6 @@ def get_gs_client():
 
 @st.cache_resource
 def get_spreadsheet():
-    """缓存 spreadsheet 对象，避免重复打开"""
     client = get_gs_client()
     return client.open_by_key(SPREADSHEET_ID)
 
@@ -44,35 +44,31 @@ def get_worksheet(sheet_title):
     return sh.worksheet(sheet_title)
 
 def ensure_worksheet_exists(sheet_title, headers):
-    """确保工作表存在，并且拥有正确的表头（不存在则创建）"""
     sh = get_spreadsheet()
     try:
         ws = sh.worksheet(sheet_title)
-        # 检查是否为空（没有数据也没有表头）
         if not ws.get_all_values():
             ws.update([headers])
         return ws
     except gspread.exceptions.WorksheetNotFound:
-        # 创建新工作表
         ws = sh.add_worksheet(title=sheet_title, rows=1, cols=len(headers))
         ws.update([headers])
         return ws
 
 def load_data_from_sheet(worksheet_name):
-    """从工作表读取数据"""
     try:
         ws = get_worksheet(worksheet_name)
         records = ws.get_all_records()
         df = pd.DataFrame(records)
+        # 对于数字字段，尝试转为数值（不强制，保留字符串）
         for col in COMMON_FIELDS:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').round(5)
+                df[col] = pd.to_numeric(df[col], errors='ignore')
         return df
     except Exception:
         return pd.DataFrame()
 
 def save_data_to_sheet(df, worksheet_name, max_retries=3):
-    """带重试的保存操作，应对限流"""
     for attempt in range(max_retries):
         try:
             ws = get_worksheet(worksheet_name)
@@ -91,20 +87,52 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
             else:
                 raise
 
+# ================== 模式配置管理 ==================
+def load_mode_options():
+    """从配置表读取所有模式选项，若表不存在则创建并填充默认值"""
+    try:
+        ws = get_worksheet(WORKSHEET_MODES)
+        records = ws.get_all_records()
+        if records:
+            modes = [r['模式'] for r in records if r.get('模式')]
+            return modes if modes else DEFAULT_MODE_OPTIONS.copy()
+        else:
+            # 空表，写入默认值
+            ws.update([['模式']] + [[m] for m in DEFAULT_MODE_OPTIONS])
+            return DEFAULT_MODE_OPTIONS.copy()
+    except gspread.exceptions.WorksheetNotFound:
+        # 创建并写入默认值
+        sh = get_spreadsheet()
+        ws = sh.add_worksheet(title=WORKSHEET_MODES, rows=1, cols=1)
+        ws.update([['模式']] + [[m] for m in DEFAULT_MODE_OPTIONS])
+        return DEFAULT_MODE_OPTIONS.copy()
+
+def add_new_mode(mode_name):
+    """向配置表追加新模式（去重）"""
+    if not mode_name or mode_name.strip() == "":
+        return False
+    mode_name = mode_name.strip()
+    existing = load_mode_options()
+    if mode_name in existing:
+        return False
+    ws = get_worksheet(WORKSHEET_MODES)
+    # 追加一行
+    ws.append_row([mode_name])
+    # 清除缓存，让下次 load_mode_options 重新读取
+    st.cache_data.clear()
+    return True
+
 # ================== 业务函数 ==================
 def init_sheets():
-    """初始化三个工作表（仅在首次访问时真正执行）"""
-    # 定义三个工作表的表头
     actual_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
     theory_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS
     optics_headers = OPTICS_FIELDS
-
-    # 一次性保证所有工作表存在
     ensure_worksheet_exists(WORKSHEET_ACTUAL, actual_headers)
     ensure_worksheet_exists(WORKSHEET_THEORY, theory_headers)
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
+    # 初始化模式配置表
+    load_mode_options()   # 内部会创建并填充默认
 
-# 其他数据读写函数保持不变，但内部调用 load_data_from_sheet / save_data_to_sheet
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL)
 
@@ -134,6 +162,17 @@ def get_data_with_source():
     df_all = df_all.fillna("")
     return df_all
 
+def safe_float_convert(value):
+    """将用户输入转换为 float 或保留原字符串，空字符串转为 None"""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        # 尝试转为 float，并保留5位小数精度
+        return round(float(value), 5)
+    except ValueError:
+        # 无法转换则保留原字符串
+        return str(value)
+
 # ================== Session 初始化 ==================
 def init_session_state():
     if 'filter_groups' not in st.session_state:
@@ -142,6 +181,49 @@ def init_session_state():
         st.session_state.actual_authenticated = False
     if 'theory_authenticated' not in st.session_state:
         st.session_state.theory_authenticated = False
+    if 'show_add_mode_actual' not in st.session_state:
+        st.session_state.show_add_mode_actual = False
+    if 'show_add_mode_theory' not in st.session_state:
+        st.session_state.show_add_mode_theory = False
+
+# ================== 辅助渲染函数 ==================
+def render_mode_selector(key_prefix, label="模式"):
+    """渲染一个带新增按钮的模式下拉框，返回选中的模式"""
+    mode_options = load_mode_options()
+    col_sel, col_btn = st.columns([4, 1])
+    with col_sel:
+        selected_mode = st.selectbox(label, mode_options, key=f"{key_prefix}_mode_select")
+    with col_btn:
+        if st.button("➕ 新增模式", key=f"{key_prefix}_add_mode_btn"):
+            st.session_state[f"show_add_mode_{key_prefix}"] = True
+    # 弹窗输入新模式
+    if st.session_state.get(f"show_add_mode_{key_prefix}", False):
+        with st.popover("新增模式", use_container_width=True):
+            new_mode = st.text_input("新模式名称", key=f"{key_prefix}_new_mode_input")
+            if st.button("确定添加", key=f"{key_prefix}_confirm_add"):
+                if new_mode and new_mode.strip():
+                    if add_new_mode(new_mode.strip()):
+                        st.success(f"模式「{new_mode.strip()}」已添加")
+                        st.session_state[f"show_add_mode_{key_prefix}"] = False
+                        st.rerun()
+                    else:
+                        st.error("模式已存在或添加失败")
+                else:
+                    st.warning("请输入模式名称")
+            if st.button("取消", key=f"{key_prefix}_cancel_add"):
+                st.session_state[f"show_add_mode_{key_prefix}"] = False
+                st.rerun()
+    return selected_mode
+
+def format_dataframe_for_display(df, fields):
+    """将 df 中的数值字段格式化为 5 位小数，非数值保持原样"""
+    df_display = df.copy()
+    for col in fields:
+        if col in df_display.columns:
+            # 仅当该列是数值类型时才格式化
+            if pd.api.types.is_numeric_dtype(df_display[col]):
+                df_display[col] = df_display[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
+    return df_display
 
 # ================== 主程序 UI ==================
 def main():
@@ -149,11 +231,6 @@ def main():
     st.title("📊 光学数据管理系统")
     init_session_state()
 
-    # 只在第一次运行或需要时初始化工作表（因为使用了缓存，不会重复请求）
-    # 但 init_sheets 内部会调用 ensure_worksheet_exists，而 ensure_worksheet_exists 内部会调用 get_worksheet
-    # 依然会发起请求，不过因为 @st.cache_resource 缓存了 spreadsheet，所以每个工作表只会创建一次。
-    # 如果已经创建过，后续调用只是检查是否存在，开销较小（但仍然有一次 get_all_values 请求）。
-    # 为了进一步减少请求，我们可以用一个 session_state 标记是否已经初始化过。
     if 'sheets_initialized' not in st.session_state:
         with st.spinner("正在检查/初始化工作表..."):
             init_sheets()
@@ -182,37 +259,18 @@ def main():
                 with col2:
                     input_stage = st.selectbox("阶段", STAGE_OPTIONS)
                 with col3:
-                    input_mode = st.selectbox("模式", MODE_OPTIONS)
+                    input_mode = render_mode_selector("actual", "模式")
                 with col4:
                     input_source = st.selectbox("数据来源", ["研发测试", "产线测试", "认证机构"])
 
                 st.subheader("2. 光学参数")
+                # 使用 text_input 允许留空或任意文字
                 cols = st.columns(len(COMMON_FIELDS))
                 input_values = {}
                 for i, field in enumerate(COMMON_FIELDS):
                     with cols[i]:
-                        default_val = 0.0
-                        if field == "亮度":
-                            default_val = 100.0
-                        elif field == "色点x":
-                            default_val = 0.26
-                        elif field == "色点y":
-                            default_val = 0.27
-                        elif field == "色温":
-                            default_val = 6500.0
-                        elif field == "Duv":
-                            default_val = 0.003
-                        elif field == "SSI":
-                            default_val = 85.0
-                        elif field == "灯温":
-                            default_val = 6500.0
-                        elif field == "duty":
-                            default_val = 50.0
-                        elif field == "对比度":
-                            default_val = 1000.0
-                        elif field == "色域":
-                            default_val = 100.0
-                        input_values[field] = st.number_input(field, value=default_val, format="%.5f", step=0.00001)
+                        input_values[field] = st.text_input(field, value="", key=f"actual_{field}",
+                                                            placeholder="留空或填入数字/文字")
 
                 st.subheader("3. 附加信息")
                 extra_cols = st.columns(len(ACTUAL_EXTRA_FIELDS))
@@ -222,13 +280,15 @@ def main():
                         input_extras[field] = st.text_input(field)
 
                 if st.form_submit_button("保存实测数据"):
+                    # 转换光学参数：空->None，数字->float，其他->原字符串
+                    converted = {f: safe_float_convert(input_values[f]) for f in COMMON_FIELDS}
                     new_row = {
                         "机型": input_model,
                         "阶段": input_stage,
                         "模式": input_mode,
                         "数据来源": input_source,
                         "实测/理论": "实测",
-                        **input_values,
+                        **converted,
                         **input_extras
                     }
                     df = load_actual_data()
@@ -247,15 +307,14 @@ def main():
             st.subheader("📜 实测历史数据管理")
             df_actual = load_actual_data()
             if not df_actual.empty:
-                display_df = df_actual.copy()
-                for col in COMMON_FIELDS:
-                    if col in display_df:
-                        display_df[col] = display_df[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
+                display_df = format_dataframe_for_display(df_actual, COMMON_FIELDS)
                 edited = st.data_editor(display_df, num_rows="dynamic", key="edit_actual", use_container_width=True)
                 if st.button("💾 保存实测表格修改"):
+                    # 恢复数值列的正确类型（将格式化后的字符串转回数字）
                     for col in COMMON_FIELDS:
                         if col in edited:
-                            edited[col] = pd.to_numeric(edited[col], errors='coerce')
+                            # 尝试将字符串转为数字，失败则保留原值
+                            edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
                     save_actual_data(edited)
                     st.success("实测历史数据已更新")
                     st.rerun()
@@ -283,7 +342,7 @@ def main():
                 with col2:
                     input_stage = st.selectbox("阶段", STAGE_OPTIONS, key="t_stage")
                 with col3:
-                    input_mode = st.selectbox("模式", MODE_OPTIONS, key="t_mode")
+                    input_mode = render_mode_selector("theory", "模式")
                 st.info("📌 理论数据的数据来源固定为：理论评估")
 
                 st.subheader("2. 光学参数")
@@ -291,37 +350,18 @@ def main():
                 input_values = {}
                 for i, field in enumerate(COMMON_FIELDS):
                     with cols[i]:
-                        default_val = 0.0
-                        if field == "亮度":
-                            default_val = 100.0
-                        elif field == "色点x":
-                            default_val = 0.26
-                        elif field == "色点y":
-                            default_val = 0.27
-                        elif field == "色温":
-                            default_val = 6500.0
-                        elif field == "Duv":
-                            default_val = 0.003
-                        elif field == "SSI":
-                            default_val = 85.0
-                        elif field == "灯温":
-                            default_val = 6500.0
-                        elif field == "duty":
-                            default_val = 50.0
-                        elif field == "对比度":
-                            default_val = 1000.0
-                        elif field == "色域":
-                            default_val = 100.0
-                        input_values[field] = st.number_input(field, value=default_val, format="%.5f", step=0.00001, key=f"t_{field}")
+                        input_values[field] = st.text_input(field, value="", key=f"theory_{field}",
+                                                            placeholder="留空或填入数字/文字")
 
                 if st.form_submit_button("保存理论数据"):
+                    converted = {f: safe_float_convert(input_values[f]) for f in COMMON_FIELDS}
                     new_row = {
                         "机型": input_model,
                         "阶段": input_stage,
                         "模式": input_mode,
                         "数据来源": "理论评估",
                         "实测/理论": "理论",
-                        **input_values
+                        **converted
                     }
                     for f in ACTUAL_EXTRA_FIELDS:
                         new_row[f] = ""
@@ -341,15 +381,12 @@ def main():
             st.subheader("📜 理论历史数据管理")
             df_theory = load_theory_data()
             if not df_theory.empty:
-                display_df = df_theory.copy()
-                for col in COMMON_FIELDS:
-                    if col in display_df:
-                        display_df[col] = display_df[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
+                display_df = format_dataframe_for_display(df_theory, COMMON_FIELDS)
                 edited = st.data_editor(display_df, num_rows="dynamic", key="edit_theory", use_container_width=True)
                 if st.button("💾 保存理论表格修改"):
                     for col in COMMON_FIELDS:
                         if col in edited:
-                            edited[col] = pd.to_numeric(edited[col], errors='coerce')
+                            edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
                     edited['数据来源'] = '理论评估'
                     save_theory_data(edited)
                     st.success("理论历史数据已更新")
@@ -357,7 +394,7 @@ def main():
             else:
                 st.info("暂无理论历史数据")
 
-    # ---------------------------------- 数据分析（无密码） ----------------------------------
+    # ---------------------------------- 数据分析 ----------------------------------
     with tab3:
         st.header("数据查询与分析")
         with st.expander("筛选条件", expanded=True):
@@ -365,6 +402,8 @@ def main():
                 st.session_state.filter_groups.append({'id': len(st.session_state.filter_groups)})
                 st.rerun()
             all_filters = []
+            # 动态获取最新的模式选项，用于筛选项
+            dynamic_mode_options = ["全部"] + load_mode_options()
             for i, g in enumerate(st.session_state.filter_groups):
                 st.markdown(f"**筛选组 {i+1}**")
                 cols = st.columns([2,1,1,2,1])
@@ -373,7 +412,7 @@ def main():
                 with cols[1]:
                     f_stage = st.selectbox("阶段", ["全部"]+STAGE_OPTIONS, key=f"stage_{i}")
                 with cols[2]:
-                    f_mode = st.selectbox("模式", ["全部"]+MODE_OPTIONS, key=f"mode_{i}")
+                    f_mode = st.selectbox("模式", dynamic_mode_options, key=f"mode_{i}")
                 with cols[3]:
                     f_source = st.selectbox("数据来源", ["全部"]+SOURCE_OPTIONS, key=f"source_{i}")
                 with cols[4]:
@@ -403,13 +442,10 @@ def main():
                     st.info("未找到符合条件的数据")
                 else:
                     st.success(f"查询结果 (共 {len(final)} 条)")
-                    display = final.copy()
-                    for col in COMMON_FIELDS:
-                        if col in display:
-                            display[col] = display[col].apply(lambda x: f"{float(x):.5f}" if pd.notna(x) else "")
+                    display = format_dataframe_for_display(final, COMMON_FIELDS)
                     st.dataframe(display, use_container_width=True)
 
-    # ---------------------------------- 光机信息（无密码） ----------------------------------
+    # ---------------------------------- 光机信息 ----------------------------------
     with tab4:
         st.header("光机信息查询")
         st.markdown("此表格用于记录各机型的光机相关信息，支持添加、编辑、删除操作。")
