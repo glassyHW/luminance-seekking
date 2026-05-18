@@ -11,7 +11,7 @@ SPREADSHEET_ID = '1JW1fQRYMts20yc4ctV8aZYzyhbb6wmLhEhMSH1EtIUU'
 WORKSHEET_ACTUAL = '实测数据'
 WORKSHEET_THEORY = '理论数据'
 WORKSHEET_OPTICS = '光机信息'
-WORKSHEET_MODES = '模式配置'          # 新增：存储动态模式选项
+WORKSHEET_MODES = '模式配置'
 
 # ================== 全局常量 ==================
 STAGE_OPTIONS = ["EVT", "DVT", "PVT", "MP"]
@@ -60,7 +60,6 @@ def load_data_from_sheet(worksheet_name):
         ws = get_worksheet(worksheet_name)
         records = ws.get_all_records()
         df = pd.DataFrame(records)
-        # 对于数字字段，尝试转为数值（不强制，保留字符串）
         for col in COMMON_FIELDS:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='ignore')
@@ -88,8 +87,8 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
                 raise
 
 # ================== 模式配置管理 ==================
+@st.cache_data(ttl=60)
 def load_mode_options():
-    """从配置表读取所有模式选项，若表不存在则创建并填充默认值"""
     try:
         ws = get_worksheet(WORKSHEET_MODES)
         records = ws.get_all_records()
@@ -97,18 +96,15 @@ def load_mode_options():
             modes = [r['模式'] for r in records if r.get('模式')]
             return modes if modes else DEFAULT_MODE_OPTIONS.copy()
         else:
-            # 空表，写入默认值
             ws.update([['模式']] + [[m] for m in DEFAULT_MODE_OPTIONS])
             return DEFAULT_MODE_OPTIONS.copy()
     except gspread.exceptions.WorksheetNotFound:
-        # 创建并写入默认值
         sh = get_spreadsheet()
         ws = sh.add_worksheet(title=WORKSHEET_MODES, rows=1, cols=1)
         ws.update([['模式']] + [[m] for m in DEFAULT_MODE_OPTIONS])
         return DEFAULT_MODE_OPTIONS.copy()
 
 def add_new_mode(mode_name):
-    """向配置表追加新模式（去重）"""
     if not mode_name or mode_name.strip() == "":
         return False
     mode_name = mode_name.strip()
@@ -116,9 +112,7 @@ def add_new_mode(mode_name):
     if mode_name in existing:
         return False
     ws = get_worksheet(WORKSHEET_MODES)
-    # 追加一行
     ws.append_row([mode_name])
-    # 清除缓存，让下次 load_mode_options 重新读取
     st.cache_data.clear()
     return True
 
@@ -130,8 +124,7 @@ def init_sheets():
     ensure_worksheet_exists(WORKSHEET_ACTUAL, actual_headers)
     ensure_worksheet_exists(WORKSHEET_THEORY, theory_headers)
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
-    # 初始化模式配置表
-    load_mode_options()   # 内部会创建并填充默认
+    load_mode_options()
 
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL)
@@ -163,15 +156,19 @@ def get_data_with_source():
     return df_all
 
 def safe_float_convert(value):
-    """将用户输入转换为 float 或保留原字符串，空字符串转为 None"""
     if value is None or str(value).strip() == "":
         return None
     try:
-        # 尝试转为 float，并保留5位小数精度
         return round(float(value), 5)
     except ValueError:
-        # 无法转换则保留原字符串
         return str(value)
+
+def format_dataframe_for_display(df, fields):
+    df_display = df.copy()
+    for col in fields:
+        if col in df_display.columns and pd.api.types.is_numeric_dtype(df_display[col]):
+            df_display[col] = df_display[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
+    return df_display
 
 # ================== Session 初始化 ==================
 def init_session_state():
@@ -181,49 +178,14 @@ def init_session_state():
         st.session_state.actual_authenticated = False
     if 'theory_authenticated' not in st.session_state:
         st.session_state.theory_authenticated = False
+    if 'selected_mode_actual' not in st.session_state:
+        st.session_state.selected_mode_actual = DEFAULT_MODE_OPTIONS[0]
+    if 'selected_mode_theory' not in st.session_state:
+        st.session_state.selected_mode_theory = DEFAULT_MODE_OPTIONS[0]
     if 'show_add_mode_actual' not in st.session_state:
         st.session_state.show_add_mode_actual = False
     if 'show_add_mode_theory' not in st.session_state:
         st.session_state.show_add_mode_theory = False
-
-# ================== 辅助渲染函数 ==================
-def render_mode_selector(key_prefix, label="模式"):
-    """渲染一个带新增按钮的模式下拉框，返回选中的模式"""
-    mode_options = load_mode_options()
-    col_sel, col_btn = st.columns([4, 1])
-    with col_sel:
-        selected_mode = st.selectbox(label, mode_options, key=f"{key_prefix}_mode_select")
-    with col_btn:
-        if st.button("➕ 新增模式", key=f"{key_prefix}_add_mode_btn"):
-            st.session_state[f"show_add_mode_{key_prefix}"] = True
-    # 弹窗输入新模式
-    if st.session_state.get(f"show_add_mode_{key_prefix}", False):
-        with st.popover("新增模式", use_container_width=True):
-            new_mode = st.text_input("新模式名称", key=f"{key_prefix}_new_mode_input")
-            if st.button("确定添加", key=f"{key_prefix}_confirm_add"):
-                if new_mode and new_mode.strip():
-                    if add_new_mode(new_mode.strip()):
-                        st.success(f"模式「{new_mode.strip()}」已添加")
-                        st.session_state[f"show_add_mode_{key_prefix}"] = False
-                        st.rerun()
-                    else:
-                        st.error("模式已存在或添加失败")
-                else:
-                    st.warning("请输入模式名称")
-            if st.button("取消", key=f"{key_prefix}_cancel_add"):
-                st.session_state[f"show_add_mode_{key_prefix}"] = False
-                st.rerun()
-    return selected_mode
-
-def format_dataframe_for_display(df, fields):
-    """将 df 中的数值字段格式化为 5 位小数，非数值保持原样"""
-    df_display = df.copy()
-    for col in fields:
-        if col in df_display.columns:
-            # 仅当该列是数值类型时才格式化
-            if pd.api.types.is_numeric_dtype(df_display[col]):
-                df_display[col] = df_display[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
-    return df_display
 
 # ================== 主程序 UI ==================
 def main():
@@ -252,6 +214,37 @@ def main():
                     else:
                         st.error("密码错误")
         else:
+            # ---- 模式选择器（在表单外部）----
+            col_mode, col_add = st.columns([3, 1])
+            with col_mode:
+                mode_options = load_mode_options()
+                selected_mode = st.selectbox(
+                    "模式", mode_options,
+                    key="actual_mode_select",
+                    index=mode_options.index(st.session_state.selected_mode_actual) if st.session_state.selected_mode_actual in mode_options else 0
+                )
+                st.session_state.selected_mode_actual = selected_mode
+            with col_add:
+                if st.button("➕ 新增模式", key="actual_add_mode_btn"):
+                    st.session_state.show_add_mode_actual = True
+            if st.session_state.show_add_mode_actual:
+                with st.popover("新增模式", use_container_width=True):
+                    new_mode = st.text_input("新模式名称", key="actual_new_mode_input")
+                    if st.button("确定添加", key="actual_confirm_add"):
+                        if new_mode and new_mode.strip():
+                            if add_new_mode(new_mode.strip()):
+                                st.success(f"模式「{new_mode.strip()}」已添加")
+                                st.session_state.show_add_mode_actual = False
+                                st.rerun()
+                            else:
+                                st.error("模式已存在或添加失败")
+                        else:
+                            st.warning("请输入模式名称")
+                    if st.button("取消", key="actual_cancel_add"):
+                        st.session_state.show_add_mode_actual = False
+                        st.rerun()
+
+            # ---- 数据录入表单 ----
             with st.form(key='actual_form', clear_on_submit=True):
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -259,12 +252,12 @@ def main():
                 with col2:
                     input_stage = st.selectbox("阶段", STAGE_OPTIONS)
                 with col3:
-                    input_mode = render_mode_selector("actual", "模式")
+                    # 只读显示当前选中的模式（不可编辑）
+                    st.text_input("模式", value=st.session_state.selected_mode_actual, disabled=True)
                 with col4:
                     input_source = st.selectbox("数据来源", ["研发测试", "产线测试", "认证机构"])
 
                 st.subheader("2. 光学参数")
-                # 使用 text_input 允许留空或任意文字
                 cols = st.columns(len(COMMON_FIELDS))
                 input_values = {}
                 for i, field in enumerate(COMMON_FIELDS):
@@ -280,12 +273,11 @@ def main():
                         input_extras[field] = st.text_input(field)
 
                 if st.form_submit_button("保存实测数据"):
-                    # 转换光学参数：空->None，数字->float，其他->原字符串
                     converted = {f: safe_float_convert(input_values[f]) for f in COMMON_FIELDS}
                     new_row = {
                         "机型": input_model,
                         "阶段": input_stage,
-                        "模式": input_mode,
+                        "模式": st.session_state.selected_mode_actual,
                         "数据来源": input_source,
                         "实测/理论": "实测",
                         **converted,
@@ -310,10 +302,8 @@ def main():
                 display_df = format_dataframe_for_display(df_actual, COMMON_FIELDS)
                 edited = st.data_editor(display_df, num_rows="dynamic", key="edit_actual", use_container_width=True)
                 if st.button("💾 保存实测表格修改"):
-                    # 恢复数值列的正确类型（将格式化后的字符串转回数字）
                     for col in COMMON_FIELDS:
                         if col in edited:
-                            # 尝试将字符串转为数字，失败则保留原值
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
                     save_actual_data(edited)
                     st.success("实测历史数据已更新")
@@ -335,6 +325,37 @@ def main():
                     else:
                         st.error("密码错误")
         else:
+            # ---- 模式选择器（在表单外部）----
+            col_mode, col_add = st.columns([3, 1])
+            with col_mode:
+                mode_options = load_mode_options()
+                selected_mode = st.selectbox(
+                    "模式", mode_options,
+                    key="theory_mode_select",
+                    index=mode_options.index(st.session_state.selected_mode_theory) if st.session_state.selected_mode_theory in mode_options else 0
+                )
+                st.session_state.selected_mode_theory = selected_mode
+            with col_add:
+                if st.button("➕ 新增模式", key="theory_add_mode_btn"):
+                    st.session_state.show_add_mode_theory = True
+            if st.session_state.show_add_mode_theory:
+                with st.popover("新增模式", use_container_width=True):
+                    new_mode = st.text_input("新模式名称", key="theory_new_mode_input")
+                    if st.button("确定添加", key="theory_confirm_add"):
+                        if new_mode and new_mode.strip():
+                            if add_new_mode(new_mode.strip()):
+                                st.success(f"模式「{new_mode.strip()}」已添加")
+                                st.session_state.show_add_mode_theory = False
+                                st.rerun()
+                            else:
+                                st.error("模式已存在或添加失败")
+                        else:
+                            st.warning("请输入模式名称")
+                    if st.button("取消", key="theory_cancel_add"):
+                        st.session_state.show_add_mode_theory = False
+                        st.rerun()
+
+            # ---- 数据录入表单 ----
             with st.form(key='theory_form', clear_on_submit=True):
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -342,7 +363,7 @@ def main():
                 with col2:
                     input_stage = st.selectbox("阶段", STAGE_OPTIONS, key="t_stage")
                 with col3:
-                    input_mode = render_mode_selector("theory", "模式")
+                    st.text_input("模式", value=st.session_state.selected_mode_theory, disabled=True)
                 st.info("📌 理论数据的数据来源固定为：理论评估")
 
                 st.subheader("2. 光学参数")
@@ -358,7 +379,7 @@ def main():
                     new_row = {
                         "机型": input_model,
                         "阶段": input_stage,
-                        "模式": input_mode,
+                        "模式": st.session_state.selected_mode_theory,
                         "数据来源": "理论评估",
                         "实测/理论": "理论",
                         **converted
@@ -402,7 +423,6 @@ def main():
                 st.session_state.filter_groups.append({'id': len(st.session_state.filter_groups)})
                 st.rerun()
             all_filters = []
-            # 动态获取最新的模式选项，用于筛选项
             dynamic_mode_options = ["全部"] + load_mode_options()
             for i, g in enumerate(st.session_state.filter_groups):
                 st.markdown(f"**筛选组 {i+1}**")
