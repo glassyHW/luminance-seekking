@@ -44,9 +44,11 @@ def get_worksheet(sheet_title):
     return sh.worksheet(sheet_title)
 
 def ensure_worksheet_exists(sheet_title, headers):
+    """确保工作表存在，且表头正确（若不存在则创建，若为空则写入表头）"""
     sh = get_spreadsheet()
     try:
         ws = sh.worksheet(sheet_title)
+        # 如果工作表为空，写入表头
         if not ws.get_all_values():
             ws.update([headers])
         return ws
@@ -56,18 +58,28 @@ def ensure_worksheet_exists(sheet_title, headers):
         return ws
 
 def load_data_from_sheet(worksheet_name):
+    """强健的数据读取：直接获取所有值，第一行为列名，支持混合类型"""
     try:
         ws = get_worksheet(worksheet_name)
-        records = ws.get_all_records()
-        df = pd.DataFrame(records)
+        all_values = ws.get_all_values()  # 二维列表
+        if not all_values:
+            return pd.DataFrame()
+        
+        headers = all_values[0]
+        data_rows = all_values[1:] if len(all_values) > 1 else []
+        df = pd.DataFrame(data_rows, columns=headers)
+        
+        # 对于 COMMON_FIELDS，尝试将字符串数字转为 float，失败则保留原字符串
         for col in COMMON_FIELDS:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='ignore')
+                df[col] = df[col].apply(lambda x: safe_float_convert(x) if x not in [None, ""] else None)
         return df
-    except Exception:
+    except Exception as e:
+        st.error(f"读取工作表 {worksheet_name} 失败: {e}")
         return pd.DataFrame()
 
 def save_data_to_sheet(df, worksheet_name, max_retries=3):
+    """带重试的保存操作，应对限流"""
     for attempt in range(max_retries):
         try:
             ws = get_worksheet(worksheet_name)
@@ -89,6 +101,7 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
 # ================== 模式配置管理 ==================
 @st.cache_data(ttl=60)
 def load_mode_options():
+    """从配置表读取所有模式选项，若表不存在则创建并填充默认值"""
     try:
         ws = get_worksheet(WORKSHEET_MODES)
         records = ws.get_all_records()
@@ -105,6 +118,7 @@ def load_mode_options():
         return DEFAULT_MODE_OPTIONS.copy()
 
 def add_new_mode(mode_name):
+    """向配置表追加新模式（去重）"""
     if not mode_name or mode_name.strip() == "":
         return False
     mode_name = mode_name.strip()
@@ -118,13 +132,14 @@ def add_new_mode(mode_name):
 
 # ================== 业务函数 ==================
 def init_sheets():
+    """初始化所有工作表（表头）"""
     actual_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
     theory_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS
     optics_headers = OPTICS_FIELDS
     ensure_worksheet_exists(WORKSHEET_ACTUAL, actual_headers)
     ensure_worksheet_exists(WORKSHEET_THEORY, theory_headers)
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
-    load_mode_options()
+    load_mode_options()  # 确保模式配置表存在
 
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL)
@@ -156,6 +171,7 @@ def get_data_with_source():
     return df_all
 
 def safe_float_convert(value):
+    """将用户输入转换为 float 或保留原字符串，空字符串转为 None"""
     if value is None or str(value).strip() == "":
         return None
     try:
@@ -164,6 +180,7 @@ def safe_float_convert(value):
         return str(value)
 
 def format_dataframe_for_display(df, fields):
+    """将 df 中的数值字段格式化为 5 位小数，非数值保持原样"""
     df_display = df.copy()
     for col in fields:
         if col in df_display.columns and pd.api.types.is_numeric_dtype(df_display[col]):
@@ -214,7 +231,7 @@ def main():
                     else:
                         st.error("密码错误")
         else:
-            # ---- 模式选择器（在表单外部）----
+            # 模式选择器（在表单外部）
             col_mode, col_add = st.columns([3, 1])
             with col_mode:
                 mode_options = load_mode_options()
@@ -244,7 +261,7 @@ def main():
                         st.session_state.show_add_mode_actual = False
                         st.rerun()
 
-            # ---- 数据录入表单 ----
+            # 数据录入表单
             with st.form(key='actual_form', clear_on_submit=True):
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -252,7 +269,6 @@ def main():
                 with col2:
                     input_stage = st.selectbox("阶段", STAGE_OPTIONS)
                 with col3:
-                    # 只读显示当前选中的模式（不可编辑）
                     st.text_input("模式", value=st.session_state.selected_mode_actual, disabled=True)
                 with col4:
                     input_source = st.selectbox("数据来源", ["研发测试", "产线测试", "认证机构"])
@@ -325,7 +341,7 @@ def main():
                     else:
                         st.error("密码错误")
         else:
-            # ---- 模式选择器（在表单外部）----
+            # 模式选择器（在表单外部）
             col_mode, col_add = st.columns([3, 1])
             with col_mode:
                 mode_options = load_mode_options()
@@ -355,7 +371,7 @@ def main():
                         st.session_state.show_add_mode_theory = False
                         st.rerun()
 
-            # ---- 数据录入表单 ----
+            # 数据录入表单
             with st.form(key='theory_form', clear_on_submit=True):
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -400,6 +416,12 @@ def main():
 
             st.markdown("---")
             st.subheader("📜 理论历史数据管理")
+            # 手动刷新按钮
+            col_refresh, _ = st.columns([1, 5])
+            with col_refresh:
+                if st.button("🔄 刷新理论数据", key="refresh_theory"):
+                    st.cache_data.clear()
+                    st.rerun()
             df_theory = load_theory_data()
             if not df_theory.empty:
                 display_df = format_dataframe_for_display(df_theory, COMMON_FIELDS)
@@ -414,6 +436,12 @@ def main():
                     st.rerun()
             else:
                 st.info("暂无理论历史数据")
+                with st.expander("💡 数据不显示怎么办？"):
+                    st.markdown("""
+                    - 请检查 Google Sheets 中的「理论数据」工作表，确保表头与代码期望一致（机型、阶段、模式、数据来源、实测/理论、亮度、色点x、...）。
+                    - 如果表头被修改，可以删除该工作表（先备份数据），程序会自动重建。
+                    - 点击上方的「刷新理论数据」按钮清除缓存。
+                    """)
 
     # ---------------------------------- 数据分析 ----------------------------------
     with tab3:
