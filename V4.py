@@ -24,15 +24,17 @@ DEFAULT_MODE_OPTIONS = [
 SOURCE_OPTIONS = ["研发测试", "产线测试", "认证机构", "理论评估"]
 EVALUATION_OBJECTS = ["光机", "整机"]
 COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温", "duty", "对比度", "色域"]
-# 实测附加字段：增加“环境温度”
 ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image", "环境温度"]
 THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]
 OPTICS_FIELDS = ["机型", "DMD型号", "灯的型号（颗数）", "风扇型号", "DMD温度（包含余量）", "记录时间"]
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
 
-# 定义理论数据不需要的列（实测专属字段，加载时自动删除）
+# 理论数据不需要的实测列
 UNWANTED_THEORY_COLS = ["照度计编号", "整机SN", "版本-固件", "版本-image"]
+
+# 需要求平均值的字段
+AVG_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "对比度", "色域"]
 
 # ================== JSON 安全转换 ==================
 def make_json_safe(value):
@@ -90,29 +92,24 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
         data_rows = all_values[1:] if len(all_values) > 1 else []
         df = pd.DataFrame(data_rows, columns=headers)
         df = df.replace(['', 'nan', 'None'], None)
-        # 数值列转换
         for col in COMMON_FIELDS:
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: safe_float_convert(x) if x not in [None, ""] else None)
         
-        # 如果是理论数据，删除不需要的列
         if remove_unwanted_cols and worksheet_name == WORKSHEET_THEORY:
             cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
             if cols_to_drop:
                 df = df.drop(columns=cols_to_drop)
                 save_data_to_sheet(df, worksheet_name)
         
-        # 如果是理论数据，确保附加列存在
         if add_missing_cols and worksheet_name == WORKSHEET_THEORY:
             for col in ["评估对象", "照度计型号", "备注"]:
                 if col not in df.columns:
                     df[col] = None
         
-        # 如果是实测数据，确保“环境温度”列存在（向后兼容）
         if add_missing_cols and worksheet_name == WORKSHEET_ACTUAL:
             if "环境温度" not in df.columns:
                 df["环境温度"] = None
-                # 可选：保存一次以修复表头（但为了避免频繁保存，仅当确实缺少且非空时才保存？这里简单处理：不自动保存，仅在 init 中统一修复）
         
         return df
     except Exception as e:
@@ -120,8 +117,6 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
         return pd.DataFrame()
 
 def save_data_to_sheet(df, worksheet_name, max_retries=3):
-    """完全清洗数据后再写入 Google Sheets"""
-    # 如果是理论数据，确保不需要的列不在df中
     if worksheet_name == WORKSHEET_THEORY:
         cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
         if cols_to_drop:
@@ -129,7 +124,6 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
         for col in ["评估对象", "照度计型号", "备注"]:
             if col not in df.columns:
                 df[col] = None
-    # 如果是实测数据，确保环境温度列存在
     if worksheet_name == WORKSHEET_ACTUAL:
         if "环境温度" not in df.columns:
             df["环境温度"] = None
@@ -197,10 +191,10 @@ def init_sheets():
     ensure_worksheet_exists(WORKSHEET_THEORY, theory_headers)
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
     load_mode_options()
-    # 修复现有理论数据表（添加缺失列并删除多余列）
+    # 修复现有理论数据表
     df_theory = load_theory_data()
     save_theory_data(df_theory)
-    # 修复现有实测数据表（确保环境温度列存在）
+    # 修复现有实测数据表（确保环境温度列）
     df_actual = load_actual_data()
     if "环境温度" not in df_actual.columns:
         df_actual["环境温度"] = None
@@ -280,6 +274,70 @@ def process_uploaded_file(uploaded_file, expected_headers, is_actual=True):
         st.error(f"文件解析失败: {e}")
         return None, False
 
+# ================== 查询结果交互函数 ==================
+def move_selected_row_up(current_df):
+    """将选中的行（第一行）上移一位"""
+    if '_selected' not in current_df.columns:
+        current_df['_selected'] = False
+    selected = current_df['_selected'] == True
+    selected_idx = current_df[selected].index.tolist()
+    if not selected_idx:
+        st.warning("请先勾选要移动的行")
+        return current_df
+    idx = selected_idx[0]
+    if idx == 0:
+        st.warning("已经是第一行，无法上移")
+        return current_df
+    new_order = current_df.index.tolist()
+    new_order[idx], new_order[idx-1] = new_order[idx-1], new_order[idx]
+    df_moved = current_df.reindex(new_order).reset_index(drop=True)
+    df_moved['_selected'] = False
+    df_moved.loc[idx-1, '_selected'] = True
+    return df_moved
+
+def move_selected_row_down(current_df):
+    """将选中的行（第一行）下移一位"""
+    if '_selected' not in current_df.columns:
+        current_df['_selected'] = False
+    selected = current_df['_selected'] == True
+    selected_idx = current_df[selected].index.tolist()
+    if not selected_idx:
+        st.warning("请先勾选要移动的行")
+        return current_df
+    idx = selected_idx[0]
+    if idx == len(current_df) - 1:
+        st.warning("已经是最后一行，无法下移")
+        return current_df
+    new_order = current_df.index.tolist()
+    new_order[idx], new_order[idx+1] = new_order[idx+1], new_order[idx]
+    df_moved = current_df.reindex(new_order).reset_index(drop=True)
+    df_moved['_selected'] = False
+    df_moved.loc[idx+1, '_selected'] = True
+    return df_moved
+
+def compute_average_of_selected(current_df):
+    """计算选中行的平均值（仅对 AVG_FIELDS）"""
+    if '_selected' not in current_df.columns:
+        st.warning("没有可选中的行")
+        return
+    selected_df = current_df[current_df['_selected'] == True]
+    if selected_df.empty:
+        st.warning("请先勾选要计算平均值的行")
+        return
+    avg_cols = [col for col in AVG_FIELDS if col in selected_df.columns]
+    if not avg_cols:
+        st.warning("没有可计算平均值的数字字段")
+        return
+    # 转为数值
+    for col in avg_cols:
+        selected_df[col] = pd.to_numeric(selected_df[col], errors='coerce')
+    means = selected_df[avg_cols].mean()
+    st.subheader("📊 选中行平均值")
+    mean_df = pd.DataFrame(means).T
+    for col in mean_df.columns:
+        mean_df[col] = mean_df[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
+    st.dataframe(mean_df, use_container_width=True)
+
 # ================== Session 初始化 ==================
 def init_session_state():
     if 'filter_groups' not in st.session_state:
@@ -296,6 +354,8 @@ def init_session_state():
         st.session_state.show_add_mode_actual = False
     if 'show_add_mode_theory' not in st.session_state:
         st.session_state.show_add_mode_theory = False
+    if 'query_result_df' not in st.session_state:
+        st.session_state.query_result_df = None
 
 # ================== 主程序 UI ==================
 def main():
@@ -310,7 +370,7 @@ def main():
 
     tab1, tab2, tab3, tab4 = st.tabs(["【录入】实测数据", "【录入】理论数据", "【查询】数据分析", "【查询】光机信息"])
 
-    # ---------------------------------- 实测数据 ----------------------------------
+    # ==================== 实测数据录入 ====================
     with tab1:
         st.header("实测数据录入")
         if not st.session_state.actual_authenticated:
@@ -324,6 +384,7 @@ def main():
                     else:
                         st.error("密码错误")
         else:
+            # 模式选择器
             col_mode, col_add = st.columns([3, 1])
             with col_mode:
                 mode_options = load_mode_options()
@@ -350,6 +411,7 @@ def main():
                         st.session_state.show_add_mode_actual = False
                         st.rerun()
 
+            # 批量导入
             st.subheader("📁 批量导入实测数据")
             uploaded_file_actual = st.file_uploader("上传 CSV 或 Excel 文件（表头需与实测数据格式一致）",
                                                     type=['csv', 'xlsx', 'xls'], key="actual_uploader")
@@ -366,6 +428,7 @@ def main():
                         st.success(f"已追加 {len(df_upload)} 条实测数据")
                         st.rerun()
 
+            # 手动录入
             st.subheader("✍️ 手动录入单条数据")
             with st.form(key='actual_form', clear_on_submit=True):
                 col1, col2, col3, col4 = st.columns(4)
@@ -387,7 +450,6 @@ def main():
                                                             placeholder="留空或填入数字/文字")
 
                 st.subheader("3. 附加信息")
-                # 附加字段数量增加了一个“环境温度”
                 extra_cols = st.columns(len(ACTUAL_EXTRA_FIELDS))
                 input_extras = {}
                 for i, field in enumerate(ACTUAL_EXTRA_FIELDS):
@@ -433,7 +495,7 @@ def main():
             else:
                 st.info("暂无实测历史数据")
 
-    # ---------------------------------- 理论数据 ----------------------------------
+    # ==================== 理论数据录入 ====================
     with tab2:
         st.header("理论数据录入")
         if not st.session_state.theory_authenticated:
@@ -473,6 +535,7 @@ def main():
                         st.session_state.show_add_mode_theory = False
                         st.rerun()
 
+            # 批量导入
             st.subheader("📁 批量导入理论数据")
             uploaded_file_theory = st.file_uploader("上传 CSV 或 Excel 文件（表头需与理论数据格式一致）",
                                                     type=['csv', 'xlsx', 'xls'], key="theory_uploader")
@@ -489,6 +552,7 @@ def main():
                         st.success(f"已追加 {len(df_upload)} 条理论数据")
                         st.rerun()
 
+            # 手动录入
             st.subheader("✍️ 手动录入单条数据")
             with st.form(key='theory_form', clear_on_submit=True):
                 col1, col2, col3, col4 = st.columns(4)
@@ -574,7 +638,7 @@ def main():
                     - 点击上方的「刷新理论数据」按钮清除缓存。
                     """)
 
-    # ---------------------------------- 数据分析 ----------------------------------
+    # ==================== 数据分析查询 ====================
     with tab3:
         st.header("数据查询与分析")
         with st.expander("筛选条件", expanded=True):
@@ -599,10 +663,12 @@ def main():
                         st.session_state.filter_groups.pop(i)
                         st.rerun()
                 all_filters.append({"model":f_model, "stage":f_stage, "mode":f_mode, "source":f_source})
+        
         if st.button("执行查询", type="primary"):
             df_all = get_data_with_source()
             if df_all.empty:
                 st.warning("暂无任何数据")
+                st.session_state.query_result_df = None
             else:
                 final = pd.DataFrame()
                 for f in all_filters:
@@ -619,12 +685,57 @@ def main():
                 final.drop_duplicates(inplace=True)
                 if final.empty:
                     st.info("未找到符合条件的数据")
+                    st.session_state.query_result_df = None
                 else:
                     st.success(f"查询结果 (共 {len(final)} 条)")
-                    display = format_dataframe_for_display(final, COMMON_FIELDS)
-                    st.dataframe(display, use_container_width=True)
+                    final['_selected'] = False
+                    st.session_state.query_result_df = final
+        
+        # 显示查询结果并支持操作
+        if st.session_state.query_result_df is not None and not st.session_state.query_result_df.empty:
+            df_current = st.session_state.query_result_df
+            # 准备显示用的数据（格式化数值）
+            display_cols = [c for c in df_current.columns if c != '_selected']
+            display_df = df_current[display_cols].copy()
+            display_df = format_dataframe_for_display(display_df, COMMON_FIELDS)
+            # 加入复选框列
+            display_df.insert(0, '_selected', df_current['_selected'])
+            
+            edited_df = st.data_editor(
+                display_df,
+                key="query_data_editor",
+                use_container_width=True,
+                column_config={
+                    "_selected": st.column_config.CheckboxColumn("选择", default=False)
+                },
+                hide_index=False,
+            )
+            # 更新 session_state 中的选中状态
+            if edited_df is not None:
+                st.session_state.query_result_df['_selected'] = edited_df['_selected']
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("⬆️ 上移选中行"):
+                    current = st.session_state.query_result_df
+                    moved = move_selected_row_up(current)
+                    st.session_state.query_result_df = moved
+                    st.rerun()
+            with col2:
+                if st.button("⬇️ 下移选中行"):
+                    current = st.session_state.query_result_df
+                    moved = move_selected_row_down(current)
+                    st.session_state.query_result_df = moved
+                    st.rerun()
+            with col3:
+                if st.button("📊 计算平均值"):
+                    compute_average_of_selected(st.session_state.query_result_df)
+        elif st.session_state.query_result_df is not None and st.session_state.query_result_df.empty:
+            st.info("请执行查询以显示数据")
+        else:
+            st.info("请设置筛选条件并点击「执行查询」")
 
-    # ---------------------------------- 光机信息 ----------------------------------
+    # ==================== 光机信息 ====================
     with tab4:
         st.header("光机信息查询")
         st.markdown("此表格用于记录各机型的光机相关信息，支持添加、编辑、删除操作。")
