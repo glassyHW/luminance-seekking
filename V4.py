@@ -24,8 +24,9 @@ DEFAULT_MODE_OPTIONS = [
 SOURCE_OPTIONS = ["研发测试", "产线测试", "认证机构", "理论评估"]
 EVALUATION_OBJECTS = ["光机", "整机"]
 COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温", "duty", "对比度", "色域"]
-ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image"]
-THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]   # 理论数据应有的附加字段
+# 实测附加字段：增加“环境温度”
+ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image", "环境温度"]
+THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]
 OPTICS_FIELDS = ["机型", "DMD型号", "灯的型号（颗数）", "风扇型号", "DMD温度（包含余量）", "记录时间"]
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
@@ -79,7 +80,7 @@ def ensure_worksheet_exists(sheet_title, headers):
         return ws
 
 # ================== 数据读写 ==================
-def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing_theory_cols=True):
+def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing_cols=True):
     try:
         ws = get_worksheet(worksheet_name)
         all_values = ws.get_all_values()
@@ -99,18 +100,19 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
             cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
             if cols_to_drop:
                 df = df.drop(columns=cols_to_drop)
-                # 立即保存清理后的数据（一次性修复）
                 save_data_to_sheet(df, worksheet_name)
         
-        # 如果是理论数据，确保附加列（照度计型号、备注）存在
-        if add_missing_theory_cols and worksheet_name == WORKSHEET_THEORY:
-            required_extra = ["照度计型号", "备注"]
-            for col in required_extra:
+        # 如果是理论数据，确保附加列存在
+        if add_missing_cols and worksheet_name == WORKSHEET_THEORY:
+            for col in ["评估对象", "照度计型号", "备注"]:
                 if col not in df.columns:
                     df[col] = None
-            # 如果评估对象列也不存在，也加上
-            if "评估对象" not in df.columns:
-                df["评估对象"] = None
+        
+        # 如果是实测数据，确保“环境温度”列存在（向后兼容）
+        if add_missing_cols and worksheet_name == WORKSHEET_ACTUAL:
+            if "环境温度" not in df.columns:
+                df["环境温度"] = None
+                # 可选：保存一次以修复表头（但为了避免频繁保存，仅当确实缺少且非空时才保存？这里简单处理：不自动保存，仅在 init 中统一修复）
         
         return df
     except Exception as e:
@@ -124,10 +126,13 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
         cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
         if cols_to_drop:
             df = df.drop(columns=cols_to_drop)
-        # 确保附加列存在
         for col in ["评估对象", "照度计型号", "备注"]:
             if col not in df.columns:
                 df[col] = None
+    # 如果是实测数据，确保环境温度列存在
+    if worksheet_name == WORKSHEET_ACTUAL:
+        if "环境温度" not in df.columns:
+            df["环境温度"] = None
     for attempt in range(max_retries):
         try:
             ws = get_worksheet(worksheet_name)
@@ -193,18 +198,22 @@ def init_sheets():
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
     load_mode_options()
     # 修复现有理论数据表（添加缺失列并删除多余列）
-    df = load_theory_data()
-    # 保存一次以同步表头
-    save_theory_data(df)
+    df_theory = load_theory_data()
+    save_theory_data(df_theory)
+    # 修复现有实测数据表（确保环境温度列存在）
+    df_actual = load_actual_data()
+    if "环境温度" not in df_actual.columns:
+        df_actual["环境温度"] = None
+        save_actual_data(df_actual)
 
 def load_actual_data():
-    return load_data_from_sheet(WORKSHEET_ACTUAL)
+    return load_data_from_sheet(WORKSHEET_ACTUAL, add_missing_cols=True)
 
 def save_actual_data(df):
     save_data_to_sheet(df, WORKSHEET_ACTUAL)
 
 def load_theory_data():
-    return load_data_from_sheet(WORKSHEET_THEORY, remove_unwanted_cols=True, add_missing_theory_cols=True)
+    return load_data_from_sheet(WORKSHEET_THEORY, remove_unwanted_cols=True, add_missing_cols=True)
 
 def save_theory_data(df):
     save_data_to_sheet(df, WORKSHEET_THEORY)
@@ -378,6 +387,7 @@ def main():
                                                             placeholder="留空或填入数字/文字")
 
                 st.subheader("3. 附加信息")
+                # 附加字段数量增加了一个“环境温度”
                 extra_cols = st.columns(len(ACTUAL_EXTRA_FIELDS))
                 input_extras = {}
                 for i, field in enumerate(ACTUAL_EXTRA_FIELDS):
@@ -548,7 +558,6 @@ def main():
                     for col in COMMON_FIELDS:
                         if col in edited:
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
-                    # 确保评估对象、照度计型号、备注列存在
                     for col in ["评估对象", "照度计型号", "备注"]:
                         if col not in edited.columns:
                             edited[col] = None
