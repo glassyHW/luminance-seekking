@@ -22,18 +22,19 @@ DEFAULT_MODE_OPTIONS = [
     "性能", "overlap"
 ]
 SOURCE_OPTIONS = ["研发测试", "产线测试", "认证机构", "理论评估"]
-EVALUATION_OBJECTS = ["光机", "整机"]    # 新增评估对象选项
+EVALUATION_OBJECTS = ["光机", "整机"]
 COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温", "duty", "对比度", "色域"]
 ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image"]
-# 理论数据新增字段
-THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]
+THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]   # 理论数据应有的附加字段
 OPTICS_FIELDS = ["机型", "DMD型号", "灯的型号（颗数）", "风扇型号", "DMD温度（包含余量）", "记录时间"]
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
 
+# 定义理论数据不需要的列（实测专属字段）
+UNWANTED_THEORY_COLS = ["照度计编号", "整机SN", "版本-固件", "版本-image"]
+
 # ================== JSON 安全转换 ==================
 def make_json_safe(value):
-    """将任何值转换为 JSON 可序列化的类型"""
     if value is None:
         return None
     if pd.isna(value):
@@ -78,7 +79,7 @@ def ensure_worksheet_exists(sheet_title, headers):
         return ws
 
 # ================== 数据读写 ==================
-def load_data_from_sheet(worksheet_name):
+def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False):
     try:
         ws = get_worksheet(worksheet_name)
         all_values = ws.get_all_values()
@@ -92,6 +93,13 @@ def load_data_from_sheet(worksheet_name):
         for col in COMMON_FIELDS:
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: safe_float_convert(x) if x not in [None, ""] else None)
+        # 如果是理论数据，删除不需要的列
+        if remove_unwanted_cols and worksheet_name == WORKSHEET_THEORY:
+            cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
+            if cols_to_drop:
+                df = df.drop(columns=cols_to_drop)
+                # 自动保存清理后的数据（一次性修复）
+                save_data_to_sheet(df, worksheet_name)
         return df
     except Exception as e:
         st.error(f"读取工作表 {worksheet_name} 失败: {e}")
@@ -99,6 +107,11 @@ def load_data_from_sheet(worksheet_name):
 
 def save_data_to_sheet(df, worksheet_name, max_retries=3):
     """完全清洗数据后再写入 Google Sheets"""
+    # 如果是理论数据，确保不需要的列不在df中
+    if worksheet_name == WORKSHEET_THEORY:
+        cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
+        if cols_to_drop:
+            df = df.drop(columns=cols_to_drop)
     for attempt in range(max_retries):
         try:
             ws = get_worksheet(worksheet_name)
@@ -158,13 +171,16 @@ def add_new_mode(mode_name):
 def init_sheets():
     # 实测数据表头
     actual_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
-    # 理论数据表头：增加评估对象、照度计型号、备注
+    # 理论数据表头
     theory_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
     optics_headers = OPTICS_FIELDS
     ensure_worksheet_exists(WORKSHEET_ACTUAL, actual_headers)
     ensure_worksheet_exists(WORKSHEET_THEORY, theory_headers)
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
     load_mode_options()
+    # 可选：立即清理理论数据中的无用列（一次性修复）
+    df = load_theory_data()
+    # 如果清理后发生了保存，会触发重新保存
 
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL)
@@ -173,7 +189,8 @@ def save_actual_data(df):
     save_data_to_sheet(df, WORKSHEET_ACTUAL)
 
 def load_theory_data():
-    return load_data_from_sheet(WORKSHEET_THEORY)
+    # 加载时自动删除不需要的列
+    return load_data_from_sheet(WORKSHEET_THEORY, remove_unwanted_cols=True)
 
 def save_theory_data(df):
     save_data_to_sheet(df, WORKSHEET_THEORY)
@@ -211,7 +228,6 @@ def format_dataframe_for_display(df, fields):
     return df_display
 
 def process_uploaded_file(uploaded_file, expected_headers, is_actual=True):
-    """处理上传的文件，is_actual=True表示实测数据，False表示理论数据"""
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, dtype=str)
@@ -223,7 +239,6 @@ def process_uploaded_file(uploaded_file, expected_headers, is_actual=True):
         if missing:
             st.error(f"文件缺少必要列: {missing}")
             return None, False
-        # 补充缺失列
         for col in expected_headers:
             if col not in df.columns:
                 df[col] = ""
@@ -286,7 +301,6 @@ def main():
                     else:
                         st.error("密码错误")
         else:
-            # 模式选择器（外部）
             col_mode, col_add = st.columns([3, 1])
             with col_mode:
                 mode_options = load_mode_options()
@@ -313,7 +327,6 @@ def main():
                         st.session_state.show_add_mode_actual = False
                         st.rerun()
 
-            # 批量导入
             st.subheader("📁 批量导入实测数据")
             uploaded_file_actual = st.file_uploader("上传 CSV 或 Excel 文件（表头需与实测数据格式一致）",
                                                     type=['csv', 'xlsx', 'xls'], key="actual_uploader")
@@ -330,7 +343,6 @@ def main():
                         st.success(f"已追加 {len(df_upload)} 条实测数据")
                         st.rerun()
 
-            # 手动录入
             st.subheader("✍️ 手动录入单条数据")
             with st.form(key='actual_form', clear_on_submit=True):
                 col1, col2, col3, col4 = st.columns(4)
@@ -411,7 +423,6 @@ def main():
                     else:
                         st.error("密码错误")
         else:
-            # 模式选择器（外部）
             col_mode, col_add = st.columns([3, 1])
             with col_mode:
                 mode_options = load_mode_options()
@@ -438,7 +449,6 @@ def main():
                         st.session_state.show_add_mode_theory = False
                         st.rerun()
 
-            # 批量导入
             st.subheader("📁 批量导入理论数据")
             uploaded_file_theory = st.file_uploader("上传 CSV 或 Excel 文件（表头需与理论数据格式一致）",
                                                     type=['csv', 'xlsx', 'xls'], key="theory_uploader")
@@ -455,7 +465,6 @@ def main():
                         st.success(f"已追加 {len(df_upload)} 条理论数据")
                         st.rerun()
 
-            # 手动录入
             st.subheader("✍️ 手动录入单条数据")
             with st.form(key='theory_form', clear_on_submit=True):
                 col1, col2, col3, col4 = st.columns(4)
@@ -480,8 +489,6 @@ def main():
                 st.subheader("3. 附加信息")
                 extra_cols = st.columns(len(THEORY_EXTRA_FIELDS))
                 input_extras = {}
-                # THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]，但评估对象已经单独处理，避免重复
-                # 这里只显示照度计型号和备注
                 with extra_cols[0]:
                     input_extras["照度计型号"] = st.text_input("照度计型号", key="t_luxmeter")
                 with extra_cols[1]:
@@ -521,13 +528,19 @@ def main():
                     st.rerun()
             df_theory = load_theory_data()
             if not df_theory.empty:
-                # 显示时自动排除非数字字段的格式化，但保留所有列
                 display_df = format_dataframe_for_display(df_theory, COMMON_FIELDS)
                 edited = st.data_editor(display_df, num_rows="dynamic", key="edit_theory", use_container_width=True)
                 if st.button("💾 保存理论表格修改"):
                     for col in COMMON_FIELDS:
                         if col in edited:
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
+                    # 确保评估对象等列存在
+                    if '评估对象' not in edited.columns:
+                        edited['评估对象'] = ""
+                    if '照度计型号' not in edited.columns:
+                        edited['照度计型号'] = ""
+                    if '备注' not in edited.columns:
+                        edited['备注'] = ""
                     edited['数据来源'] = '理论评估'
                     save_theory_data(edited)
                     st.success("理论历史数据已更新")
