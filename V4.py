@@ -26,7 +26,8 @@ EVALUATION_OBJECTS = ["光机", "整机"]
 COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温", "duty", "对比度", "色域"]
 ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image", "环境温度"]
 THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]
-OPTICS_FIELDS = ["机型", "DMD型号", "灯的型号（颗数）", "风扇型号", "DMD温度（包含余量）", "记录时间"]
+# 光机信息默认字段（支持自定义新增）
+DEFAULT_OPTICS_FIELDS = ["机型", "DMD型号", "光源型号", "DMD温度（含余量）"]
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
 
@@ -79,11 +80,15 @@ def ensure_worksheet_exists(sheet_title, headers):
         return ws
 
 # ================== 数据读写 ==================
-def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing_cols=True):
+def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing_cols=True, default_headers=None):
     try:
         ws = get_worksheet(worksheet_name)
         all_values = ws.get_all_values()
         if not all_values:
+            # 如果工作表为空但提供了默认表头，则创建
+            if default_headers:
+                ws.update([default_headers])
+                return pd.DataFrame(columns=default_headers)
             return pd.DataFrame()
         headers = [h.strip() for h in all_values[0]]
         data_rows = all_values[1:] if len(all_values) > 1 else []
@@ -107,6 +112,15 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
         if add_missing_cols and worksheet_name == WORKSHEET_ACTUAL:
             if "环境温度" not in df.columns:
                 df["环境温度"] = None
+        
+        # 对于光机信息，如果表头缺少默认字段，则补充（但不删除现有自定义列）
+        if worksheet_name == WORKSHEET_OPTICS and default_headers:
+            for col in default_headers:
+                if col not in df.columns:
+                    df[col] = None
+            # 重新排列列顺序：默认字段在前，自定义字段在后
+            existing_custom = [c for c in df.columns if c not in default_headers]
+            df = df[default_headers + existing_custom]
         
         return df
     except Exception as e:
@@ -183,7 +197,8 @@ def add_new_mode(mode_name):
 def init_sheets():
     actual_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
     theory_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
-    optics_headers = OPTICS_FIELDS
+    # 光机信息默认表头
+    optics_headers = DEFAULT_OPTICS_FIELDS.copy()
     ensure_worksheet_exists(WORKSHEET_ACTUAL, actual_headers)
     ensure_worksheet_exists(WORKSHEET_THEORY, theory_headers)
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
@@ -196,6 +211,9 @@ def init_sheets():
     if "环境温度" not in df_actual.columns:
         df_actual["环境温度"] = None
         save_actual_data(df_actual)
+    # 修复光机信息表：确保默认字段存在，保留自定义列
+    df_optics = load_optics_data()
+    save_optics_data(df_optics)
 
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL, add_missing_cols=True)
@@ -210,7 +228,7 @@ def save_theory_data(df):
     save_data_to_sheet(df, WORKSHEET_THEORY)
 
 def load_optics_data():
-    return load_data_from_sheet(WORKSHEET_OPTICS)
+    return load_data_from_sheet(WORKSHEET_OPTICS, default_headers=DEFAULT_OPTICS_FIELDS)
 
 def save_optics_data(df):
     save_data_to_sheet(df, WORKSHEET_OPTICS)
@@ -271,9 +289,8 @@ def process_uploaded_file(uploaded_file, expected_headers, is_actual=True):
         st.error(f"文件解析失败: {e}")
         return None, False
 
-# ================== 查询结果交互函数（修复索引错误） ==================
+# ================== 查询结果交互函数 ==================
 def move_selected_row_up(current_df):
-    """将选中的行（第一行）上移一位"""
     if '_selected' not in current_df.columns:
         current_df['_selected'] = False
     current_df = current_df.reset_index(drop=True)
@@ -286,7 +303,6 @@ def move_selected_row_up(current_df):
     if idx == 0:
         st.warning("已经是第一行，无法上移")
         return current_df
-    # 使用 iloc 交换两行
     order = list(range(len(current_df)))
     order[idx], order[idx-1] = order[idx-1], order[idx]
     moved_df = current_df.iloc[order].reset_index(drop=True)
@@ -295,7 +311,6 @@ def move_selected_row_up(current_df):
     return moved_df
 
 def move_selected_row_down(current_df):
-    """将选中的行（第一行）下移一位"""
     if '_selected' not in current_df.columns:
         current_df['_selected'] = False
     current_df = current_df.reset_index(drop=True)
@@ -316,7 +331,6 @@ def move_selected_row_down(current_df):
     return moved_df
 
 def compute_average_of_selected(current_df):
-    """计算选中行的平均值（仅对 AVG_FIELDS）"""
     if '_selected' not in current_df.columns:
         st.warning("没有可选中的行")
         return
@@ -355,6 +369,8 @@ def init_session_state():
         st.session_state.show_add_mode_theory = False
     if 'query_result_df' not in st.session_state:
         st.session_state.query_result_df = None
+    if 'optics_custom_columns' not in st.session_state:
+        st.session_state.optics_custom_columns = []  # 存储自定义列名
 
 # ================== 主程序 UI ==================
 def main():
@@ -369,7 +385,7 @@ def main():
 
     tab1, tab2, tab3, tab4 = st.tabs(["【录入】实测数据", "【录入】理论数据", "【查询】数据分析", "【查询】光机信息"])
 
-    # -------------------- 实测数据 --------------------
+    # -------------------- 实测数据（保持不变） --------------------
     with tab1:
         st.header("实测数据录入")
         if not st.session_state.actual_authenticated:
@@ -491,7 +507,7 @@ def main():
             else:
                 st.info("暂无实测历史数据")
 
-    # -------------------- 理论数据 --------------------
+    # -------------------- 理论数据（保持不变） --------------------
     with tab2:
         st.header("理论数据录入")
         if not st.session_state.theory_authenticated:
@@ -685,26 +701,20 @@ def main():
                     final['_selected'] = False
                     st.session_state.query_result_df = final
         
-        # 显示查询结果并支持操作
         if st.session_state.query_result_df is not None and not st.session_state.query_result_df.empty:
             df_current = st.session_state.query_result_df
-            # 准备显示用的数据（格式化数值）
             display_cols = [c for c in df_current.columns if c != '_selected']
             display_df = df_current[display_cols].copy()
             display_df = format_dataframe_for_display(display_df, COMMON_FIELDS)
-            # 加入复选框列（放在第一列）
             display_df.insert(0, '_selected', df_current['_selected'])
             
             edited_df = st.data_editor(
                 display_df,
                 key="query_data_editor",
                 use_container_width=True,
-                column_config={
-                    "_selected": st.column_config.CheckboxColumn("选择", default=False)
-                },
+                column_config={"_selected": st.column_config.CheckboxColumn("选择", default=False)},
                 hide_index=False,
             )
-            # 更新 session_state 中的选中状态
             if edited_df is not None and '_selected' in edited_df.columns:
                 st.session_state.query_result_df['_selected'] = edited_df['_selected']
             
@@ -732,30 +742,70 @@ def main():
         else:
             st.info("请设置筛选条件并点击「执行查询」")
 
-    # -------------------- 光机信息 --------------------
+    # -------------------- 光机信息（支持自定义新增字段） --------------------
     with tab4:
-        st.header("光机信息查询")
-        st.markdown("此表格用于记录各机型的光机相关信息，支持添加、编辑、删除操作。")
+        st.header("光机信息查询与管理")
+        st.markdown("此表格用于记录各机型的光机相关信息。默认字段：**机型、DMD型号、光源型号、DMD温度（含余量）**。")
+        st.markdown("您可以通过下方按钮添加自定义列（新字段），然后在表格中录入数据。所有列均会保存到 Google Sheets。")
+        
+        # 加载现有数据（自动补全默认字段并保留自定义列）
         df_optics = load_optics_data()
-        edited = st.data_editor(
-            df_optics,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="optics_editor",
-            column_config={
-                "机型": st.column_config.TextColumn("机型", required=True),
-                "DMD型号": st.column_config.TextColumn("DMD型号"),
-                "灯的型号（颗数）": st.column_config.TextColumn("灯的型号（颗数）", help="例如：LED 3颗"),
-                "风扇型号": st.column_config.TextColumn("风扇型号"),
-                "DMD温度（包含余量）": st.column_config.TextColumn("DMD温度（包含余量）", help="例如：60°C (余量5°C)"),
-                "记录时间": st.column_config.TextColumn("记录时间", help="格式建议：YYYY-MM-DD HH:MM"),
-            }
-        )
-        if st.button("💾 保存光机信息"):
-            save_optics_data(edited)
-            st.success("光机信息已保存！")
-            st.rerun()
-        st.caption("提示：在表格最后一行下方点击“+”可添加新行，勾选行前面的复选框后点击上方出现的“删除”按钮可删除行。")
+        
+        # 自定义列管理
+        col_new, _ = st.columns([2, 3])
+        with col_new:
+            new_col_name = st.text_input("新字段名称（列名）", key="new_optics_col", placeholder="例如：透镜型号")
+            if st.button("➕ 添加自定义字段", key="add_optics_col"):
+                if new_col_name and new_col_name.strip():
+                    new_col = new_col_name.strip()
+                    if new_col not in df_optics.columns:
+                        df_optics[new_col] = None
+                        st.success(f"已添加字段: {new_col}")
+                        # 保存更新后的 DataFrame（添加新列）
+                        save_optics_data(df_optics)
+                        st.rerun()
+                    else:
+                        st.warning("该字段已存在")
+                else:
+                    st.warning("请输入字段名称")
+        
+        # 显示可编辑表格
+        if not df_optics.empty:
+            # 将默认字段放在前面，自定义字段放在后面
+            default_cols = [c for c in DEFAULT_OPTICS_FIELDS if c in df_optics.columns]
+            custom_cols = [c for c in df_optics.columns if c not in DEFAULT_OPTICS_FIELDS]
+            ordered_cols = default_cols + custom_cols
+            df_optics = df_optics[ordered_cols]
+            
+            edited_df = st.data_editor(
+                df_optics,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="optics_editor",
+                column_config={
+                    col: st.column_config.TextColumn(col) for col in df_optics.columns
+                }
+            )
+            if st.button("💾 保存光机信息", key="save_optics"):
+                save_optics_data(edited_df)
+                st.success("光机信息已保存！")
+                st.rerun()
+        else:
+            # 如果为空，创建一个只有默认字段的空 DataFrame
+            empty_df = pd.DataFrame(columns=DEFAULT_OPTICS_FIELDS)
+            edited_df = st.data_editor(
+                empty_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="optics_editor_empty",
+                column_config={col: st.column_config.TextColumn(col) for col in DEFAULT_OPTICS_FIELDS}
+            )
+            if st.button("💾 保存光机信息", key="save_optics_empty"):
+                save_optics_data(edited_df)
+                st.success("光机信息已保存！")
+                st.rerun()
+        
+        st.caption("提示：在表格最后一行下方点击“+”可添加新行；通过上方的输入框可以添加自定义列（新字段），添加后请点击保存。")
 
 if __name__ == "__main__":
     main()
