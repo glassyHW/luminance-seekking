@@ -13,7 +13,7 @@ WORKSHEET_ACTUAL = '实测数据'
 WORKSHEET_THEORY = '理论数据'
 WORKSHEET_OPTICS = '光机信息'
 WORKSHEET_MODES = '模式配置'
-WORKSHEET_THERMAL = '散热数据'          # 新增
+WORKSHEET_THERMAL = '散热数据'
 
 # ================== 全局常量 ==================
 STAGE_OPTIONS = ["EVT", "DVT", "PVT", "MP"]
@@ -28,18 +28,16 @@ COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温
 ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image", "环境温度"]
 THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]
 
-# 散热数据字段
 THERMAL_FIELDS = [
     "机型", "阶段", "模式", "光机功耗", "整机功耗", "环境温度", "风扇转速",
     "灯温", "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
     "DMD电功耗", "DMD总功耗", "DMD spec", "DMD-TP1", "DMD余量"
 ]
 
-# 光机信息默认字段（支持自定义新增）
 DEFAULT_OPTICS_FIELDS = ["机型", "DMD型号", "光源型号", "DMD温度（含余量）"]
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
-THERMAL_PASSWORD = "Aa888888"          # 散热密码
+THERMAL_PASSWORD = "Aa888888"
 
 UNWANTED_THEORY_COLS = ["照度计编号", "整机SN", "版本-固件", "版本-image"]
 AVG_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "对比度", "色域"]
@@ -89,60 +87,67 @@ def ensure_worksheet_exists(sheet_title, headers):
         ws.update([headers])
         return ws
 
-# ================== 数据读写 ==================
-def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing_cols=True, default_headers=None):
-    try:
-        ws = get_worksheet(worksheet_name)
-        all_values = ws.get_all_values()
-        if not all_values:
-            if default_headers:
-                ws.update([default_headers])
-                return pd.DataFrame(columns=default_headers)
+# ================== 数据读写（带重试） ==================
+def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing_cols=True, default_headers=None, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            ws = get_worksheet(worksheet_name)
+            all_values = ws.get_all_values()
+            if not all_values:
+                if default_headers:
+                    ws.update([default_headers])
+                    return pd.DataFrame(columns=default_headers)
+                return pd.DataFrame()
+            headers = [h.strip() for h in all_values[0]]
+            data_rows = all_values[1:] if len(all_values) > 1 else []
+            df = pd.DataFrame(data_rows, columns=headers)
+            df = df.replace(['', 'nan', 'None'], None)
+
+            if worksheet_name == WORKSHEET_THERMAL:
+                numeric_fields = ["光机功耗", "整机功耗", "环境温度", "风扇转速", "灯温",
+                                  "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
+                                  "DMD电功耗", "DMD总功耗", "DMD余量"]
+                for col in numeric_fields:
+                    if col in df.columns:
+                        df[col] = df[col].apply(lambda x: safe_float_convert(x) if x not in [None, ""] else None)
+            else:
+                for col in COMMON_FIELDS:
+                    if col in df.columns:
+                        df[col] = df[col].apply(lambda x: safe_float_convert(x) if x not in [None, ""] else None)
+
+            if remove_unwanted_cols and worksheet_name == WORKSHEET_THEORY:
+                cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
+                if cols_to_drop:
+                    df = df.drop(columns=cols_to_drop)
+                    save_data_to_sheet(df, worksheet_name)
+
+            if add_missing_cols and worksheet_name == WORKSHEET_THEORY:
+                for col in ["评估对象", "照度计型号", "备注"]:
+                    if col not in df.columns:
+                        df[col] = None
+
+            if add_missing_cols and worksheet_name == WORKSHEET_ACTUAL:
+                if "环境温度" not in df.columns:
+                    df["环境温度"] = None
+
+            if worksheet_name == WORKSHEET_OPTICS and default_headers:
+                for col in default_headers:
+                    if col not in df.columns:
+                        df[col] = None
+                existing_custom = [c for c in df.columns if c not in default_headers]
+                df = df[default_headers + existing_custom]
+
+            return df
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                st.warning(f"API 读限流，等待 {wait} 秒后重试...")
+                time.sleep(wait)
+            else:
+                raise
+        except Exception as e:
+            st.error(f"读取工作表 {worksheet_name} 失败: {e}")
             return pd.DataFrame()
-        headers = [h.strip() for h in all_values[0]]
-        data_rows = all_values[1:] if len(all_values) > 1 else []
-        df = pd.DataFrame(data_rows, columns=headers)
-        df = df.replace(['', 'nan', 'None'], None)
-        
-        # 对散热数据特殊处理数值字段
-        if worksheet_name == WORKSHEET_THERMAL:
-            numeric_fields = ["光机功耗", "整机功耗", "环境温度", "风扇转速", "灯温",
-                              "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
-                              "DMD电功耗", "DMD总功耗", "DMD余量"]
-            for col in numeric_fields:
-                if col in df.columns:
-                    df[col] = df[col].apply(lambda x: safe_float_convert(x) if x not in [None, ""] else None)
-        else:
-            for col in COMMON_FIELDS:
-                if col in df.columns:
-                    df[col] = df[col].apply(lambda x: safe_float_convert(x) if x not in [None, ""] else None)
-        
-        if remove_unwanted_cols and worksheet_name == WORKSHEET_THEORY:
-            cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
-            if cols_to_drop:
-                df = df.drop(columns=cols_to_drop)
-                save_data_to_sheet(df, worksheet_name)
-        
-        if add_missing_cols and worksheet_name == WORKSHEET_THEORY:
-            for col in ["评估对象", "照度计型号", "备注"]:
-                if col not in df.columns:
-                    df[col] = None
-        
-        if add_missing_cols and worksheet_name == WORKSHEET_ACTUAL:
-            if "环境温度" not in df.columns:
-                df["环境温度"] = None
-        
-        if worksheet_name == WORKSHEET_OPTICS and default_headers:
-            for col in default_headers:
-                if col not in df.columns:
-                    df[col] = None
-            existing_custom = [c for c in df.columns if c not in default_headers]
-            df = df[default_headers + existing_custom]
-        
-        return df
-    except Exception as e:
-        st.error(f"读取工作表 {worksheet_name} 失败: {e}")
-        return pd.DataFrame()
 
 def save_data_to_sheet(df, worksheet_name, max_retries=3):
     if worksheet_name == WORKSHEET_THEORY:
@@ -155,7 +160,7 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
     if worksheet_name == WORKSHEET_ACTUAL:
         if "环境温度" not in df.columns:
             df["环境温度"] = None
-    # 散热数据不需要额外处理
+
     for attempt in range(max_retries):
         try:
             ws = get_worksheet(worksheet_name)
@@ -172,8 +177,8 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
             return
         except gspread.exceptions.APIError as e:
             if "429" in str(e) and attempt < max_retries - 1:
-                wait = 2 ** attempt
-                st.warning(f"API限流，等待 {wait} 秒后重试...")
+                wait = 2 ** (attempt + 1)
+                st.warning(f"API 写限流，等待 {wait} 秒后重试...")
                 time.sleep(wait)
             else:
                 raise
@@ -181,23 +186,29 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
             st.error(f"保存失败: {e}")
             raise
 
-# ================== 模式配置 ==================
-@st.cache_data(ttl=60)
+# ================== 模式配置（带缓存和重试） ==================
+@st.cache_data(ttl=300)
 def load_mode_options():
-    try:
-        ws = get_worksheet(WORKSHEET_MODES)
-        records = ws.get_all_records()
-        if records:
-            modes = [r['模式'] for r in records if r.get('模式')]
-            return modes if modes else DEFAULT_MODE_OPTIONS.copy()
-        else:
+    for attempt in range(3):
+        try:
+            ws = get_worksheet(WORKSHEET_MODES)
+            records = ws.get_all_records()
+            if records:
+                modes = [r['模式'] for r in records if r.get('模式')]
+                return modes if modes else DEFAULT_MODE_OPTIONS.copy()
+            else:
+                ws.update([['模式']] + [[m] for m in DEFAULT_MODE_OPTIONS])
+                return DEFAULT_MODE_OPTIONS.copy()
+        except gspread.exceptions.APIError as e:
+            if "429" in str(e) and attempt < 2:
+                time.sleep(2 ** (attempt + 1))
+            else:
+                raise
+        except gspread.exceptions.WorksheetNotFound:
+            sh = get_spreadsheet()
+            ws = sh.add_worksheet(title=WORKSHEET_MODES, rows=1, cols=1)
             ws.update([['模式']] + [[m] for m in DEFAULT_MODE_OPTIONS])
             return DEFAULT_MODE_OPTIONS.copy()
-    except gspread.exceptions.WorksheetNotFound:
-        sh = get_spreadsheet()
-        ws = sh.add_worksheet(title=WORKSHEET_MODES, rows=1, cols=1)
-        ws.update([['模式']] + [[m] for m in DEFAULT_MODE_OPTIONS])
-        return DEFAULT_MODE_OPTIONS.copy()
 
 def add_new_mode(mode_name):
     if not mode_name or not mode_name.strip():
@@ -211,7 +222,7 @@ def add_new_mode(mode_name):
     st.cache_data.clear()
     return True
 
-# ================== 业务函数 ==================
+# ================== 业务函数（带缓存） ==================
 def init_sheets():
     actual_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
     theory_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
@@ -222,42 +233,42 @@ def init_sheets():
     ensure_worksheet_exists(WORKSHEET_THERMAL, thermal_headers)
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
     load_mode_options()
-    # 修复现有理论数据表
+    # 只在缺失列时保存（避免无效写入）
     df_theory = load_theory_data()
-    save_theory_data(df_theory)
-    # 修复现有实测数据表（确保环境温度列）
+    if "评估对象" not in df_theory.columns or "照度计型号" not in df_theory.columns or "备注" not in df_theory.columns:
+        save_theory_data(df_theory)
     df_actual = load_actual_data()
     if "环境温度" not in df_actual.columns:
         df_actual["环境温度"] = None
         save_actual_data(df_actual)
-    # 修复光机信息表：确保默认字段存在，保留自定义列
-    df_optics = load_optics_data()
-    save_optics_data(df_optics)
+    # 光机信息不需要每次启动都保存
 
+@st.cache_data(ttl=300)
 def load_actual_data():
     return load_data_from_sheet(WORKSHEET_ACTUAL, add_missing_cols=True)
 
 def save_actual_data(df):
     save_data_to_sheet(df, WORKSHEET_ACTUAL)
 
+@st.cache_data(ttl=300)
 def load_theory_data():
     return load_data_from_sheet(WORKSHEET_THEORY, remove_unwanted_cols=True, add_missing_cols=True)
 
 def save_theory_data(df):
     save_data_to_sheet(df, WORKSHEET_THEORY)
 
+@st.cache_data(ttl=300)
 def load_optics_data():
     return load_data_from_sheet(WORKSHEET_OPTICS, default_headers=DEFAULT_OPTICS_FIELDS)
 
 def save_optics_data(df):
     save_data_to_sheet(df, WORKSHEET_OPTICS)
 
+@st.cache_data(ttl=300)
 def load_thermal_data():
-    """加载散热数据"""
     return load_data_from_sheet(WORKSHEET_THERMAL, default_headers=THERMAL_FIELDS)
 
 def save_thermal_data(df):
-    """保存散热数据"""
     save_data_to_sheet(df, WORKSHEET_THERMAL)
 
 def get_data_with_source():
@@ -416,13 +427,12 @@ def main():
             init_sheets()
             st.session_state.sheets_initialized = True
 
-    # 增加第五个标签页
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "【录入】实测数据", "【录入】理论数据", "【查询】数据分析",
         "【查询】光机信息", "【录入】散热数据"
     ])
 
-    # -------------------- 实测数据（原有代码保持不变） --------------------
+    # -------------------- 实测数据 --------------------
     with tab1:
         st.header("实测数据录入")
         if not st.session_state.actual_authenticated:
@@ -436,7 +446,6 @@ def main():
                     else:
                         st.error("密码错误")
         else:
-            # 模式选择器
             col_mode, col_add = st.columns([3, 1])
             with col_mode:
                 mode_options = load_mode_options()
@@ -545,7 +554,7 @@ def main():
             else:
                 st.info("暂无实测历史数据")
 
-    # -------------------- 理论数据（原有代码保持不变） --------------------
+    # -------------------- 理论数据 --------------------
     with tab2:
         st.header("理论数据录入")
         if not st.session_state.theory_authenticated:
@@ -780,7 +789,7 @@ def main():
         else:
             st.info("请设置筛选条件并点击「执行查询」")
 
-    # -------------------- 光机信息（支持自定义新增字段） --------------------
+    # -------------------- 光机信息 --------------------
     with tab4:
         st.header("光机信息查询与管理")
         st.markdown("此表格用于记录各机型的光机相关信息。默认字段：**机型、DMD型号、光源型号、DMD温度（含余量）**。")
@@ -837,7 +846,7 @@ def main():
         
         st.caption("提示：在表格最后一行下方点击“+”可添加新行；通过上方的输入框可以添加自定义列（新字段），添加后请点击保存。")
 
-    # -------------------- 散热数据录入（新增） --------------------
+    # -------------------- 散热数据录入 --------------------
     with tab5:
         st.header("散热数据录入")
         if not st.session_state.thermal_authenticated:
@@ -851,7 +860,6 @@ def main():
                     else:
                         st.error("密码错误")
         else:
-            # 模式选择器
             col_mode, col_add = st.columns([3, 1])
             with col_mode:
                 mode_options = load_mode_options()
@@ -878,7 +886,6 @@ def main():
                         st.session_state.show_add_mode_thermal = False
                         st.rerun()
 
-            # 手动录入单条散热数据
             st.subheader("✍️ 手动录入单条散热数据")
             with st.form(key='thermal_form', clear_on_submit=True):
                 col1, col2, col3 = st.columns(3)
@@ -890,7 +897,6 @@ def main():
                     st.text_input("模式", value=st.session_state.selected_mode_thermal, disabled=True)
                 
                 st.subheader("散热参数")
-                # 需要输入的散热参数（不包含机型、阶段、模式）
                 thermal_param_fields = [
                     "光机功耗", "整机功耗", "环境温度", "风扇转速", "灯温",
                     "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
@@ -904,7 +910,6 @@ def main():
                                                             placeholder="留空或填入数字/文字")
                 
                 if st.form_submit_button("保存散热数据"):
-                    # 转换数值字段
                     converted = {f: safe_float_convert(input_values[f]) for f in thermal_param_fields}
                     new_row = {
                         "机型": input_model,
@@ -912,7 +917,6 @@ def main():
                         "模式": st.session_state.selected_mode_thermal,
                         **converted
                     }
-                    # 确保所有字段都存在（若缺少则补None）
                     for col in THERMAL_FIELDS:
                         if col not in new_row:
                             new_row[col] = None
@@ -920,7 +924,6 @@ def main():
                     if df.empty:
                         df = pd.DataFrame([new_row])
                     else:
-                        # 对齐列
                         for k in new_row:
                             if k not in df.columns:
                                 df[k] = None
@@ -938,12 +941,10 @@ def main():
                     st.rerun()
             df_thermal = load_thermal_data()
             if not df_thermal.empty:
-                # 数值字段（除机型、阶段、模式）
                 numeric_fields = [f for f in THERMAL_FIELDS if f not in ["机型", "阶段", "模式"]]
                 display_df = format_dataframe_for_display(df_thermal, numeric_fields)
                 edited = st.data_editor(display_df, num_rows="dynamic", key="edit_thermal", use_container_width=True)
                 if st.button("💾 保存散热表格修改"):
-                    # 将字符串数字转回数值
                     for col in numeric_fields:
                         if col in edited:
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
