@@ -35,7 +35,9 @@ THERMAL_FIELDS = [
 ]
 THERMAL_AVG_FIELDS = [f for f in THERMAL_FIELDS if f not in ["机型", "阶段", "模式"]]
 
-DEFAULT_OPTICS_FIELDS = ["机型", "DMD型号", "光源型号", "DMD温度（含余量）"]
+# 光机信息不再预设默认字段，改为空列表
+DEFAULT_OPTICS_FIELDS = []  # 删除默认字段，用户自行添加
+
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
 THERMAL_PASSWORD = "Aa888888"
@@ -81,11 +83,19 @@ def ensure_worksheet_exists(sheet_title, headers):
     try:
         ws = sh.worksheet(sheet_title)
         if not ws.get_all_values():
-            ws.update([headers])
+            # 如果工作表为空且提供了表头，则写入表头；否则留空
+            if headers:
+                ws.update([headers])
         return ws
     except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_title, rows=1, cols=len(headers))
-        ws.update([headers])
+        # 创建新工作表，列数至少为1
+        cols = len(headers) if headers else 1
+        ws = sh.add_worksheet(title=sheet_title, rows=1, cols=cols)
+        if headers:
+            ws.update([headers])
+        else:
+            # 若没有表头，写入一个空字符串占位，让用户自行添加
+            ws.update([[""]])
         return ws
 
 # ================== 数据读写（带重试） ==================
@@ -131,12 +141,15 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
                 if "环境温度" not in df.columns:
                     df["环境温度"] = None
 
-            if worksheet_name == WORKSHEET_OPTICS and default_headers:
-                for col in default_headers:
-                    if col not in df.columns:
-                        df[col] = None
-                existing_custom = [c for c in df.columns if c not in default_headers]
-                df = df[default_headers + existing_custom]
+            # 光机信息不再自动补充默认字段，保留用户自定义列
+            if worksheet_name == WORKSHEET_OPTICS and default_headers is not None:
+                # 若 default_headers 为空列表，则不添加任何列
+                if default_headers:
+                    for col in default_headers:
+                        if col not in df.columns:
+                            df[col] = None
+                    existing_custom = [c for c in df.columns if c not in default_headers]
+                    df = df[default_headers + existing_custom]
 
             return df
         except gspread.exceptions.APIError as e:
@@ -174,7 +187,12 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
                     clean_rows.append([make_json_safe(cell) for cell in row])
                 ws.update(clean_rows)
             else:
-                ws.update([df.columns.tolist()])
+                # 空 DataFrame 时，如果工作表应该保留表头，则写入表头；否则清空
+                if df.columns.tolist():
+                    ws.update([df.columns.tolist()])
+                else:
+                    # 完全空表，写入一个空白单元格占位
+                    ws.update([[""]])
             return
         except gspread.exceptions.APIError as e:
             if "429" in str(e) and attempt < max_retries - 1:
@@ -228,11 +246,11 @@ def init_sheets():
     actual_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
     theory_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
     thermal_headers = THERMAL_FIELDS.copy()
-    optics_headers = DEFAULT_OPTICS_FIELDS.copy()
+    # 光机信息不再预设表头，传入空列表，确保工作表存在但不写入默认列
     ensure_worksheet_exists(WORKSHEET_ACTUAL, actual_headers)
     ensure_worksheet_exists(WORKSHEET_THEORY, theory_headers)
     ensure_worksheet_exists(WORKSHEET_THERMAL, thermal_headers)
-    ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
+    ensure_worksheet_exists(WORKSHEET_OPTICS, [])  # 空表头，用户自行添加列
     load_mode_options()
     # 修复现有数据（仅补充缺失列）
     df_theory = load_theory_data()
@@ -259,7 +277,8 @@ def save_theory_data(df):
 
 @st.cache_data(ttl=300)
 def load_optics_data():
-    return load_data_from_sheet(WORKSHEET_OPTICS, default_headers=DEFAULT_OPTICS_FIELDS)
+    # 传入空列表作为默认表头，不自动补充任何列
+    return load_data_from_sheet(WORKSHEET_OPTICS, default_headers=[])
 
 def save_optics_data(df):
     save_data_to_sheet(df, WORKSHEET_OPTICS)
@@ -453,276 +472,17 @@ def main():
             init_sheets()
             st.session_state.sheets_initialized = True
 
+    # 调整 Tab 顺序：数据分析放在第一位，光机信息放在最后一位
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "【录入】实测数据", "【录入】理论数据", "【查询】数据分析",
-        "【查询】光机信息", "【录入】散热数据"
+        "【查询】数据分析",
+        "【录入】实测数据",
+        "【录入】理论数据",
+        "【录入】散热数据",
+        "【查询】光机信息"
     ])
 
-    # -------------------- 实测数据 --------------------
-    with tab1:
-        st.header("实测数据录入")
-        if not st.session_state.actual_authenticated:
-            st.warning("请输入密码以查看和操作实测数据")
-            with st.form("actual_auth_form"):
-                pwd = st.text_input("密码", type="password")
-                if st.form_submit_button("验证"):
-                    if pwd == ACTUAL_PASSWORD:
-                        st.session_state.actual_authenticated = True
-                        st.rerun()
-                    else:
-                        st.error("密码错误")
-        else:
-            col_mode, col_add = st.columns([3, 1])
-            with col_mode:
-                mode_options = load_mode_options()
-                selected_mode = st.selectbox("模式", mode_options, key="actual_mode_select",
-                                             index=mode_options.index(st.session_state.selected_mode_actual) if st.session_state.selected_mode_actual in mode_options else 0)
-                st.session_state.selected_mode_actual = selected_mode
-            with col_add:
-                if st.button("➕ 新增模式", key="actual_add_mode_btn"):
-                    st.session_state.show_add_mode_actual = True
-            if st.session_state.show_add_mode_actual:
-                with st.popover("新增模式", use_container_width=True):
-                    new_mode = st.text_input("新模式名称", key="actual_new_mode_input")
-                    if st.button("确定添加", key="actual_confirm_add"):
-                        if new_mode and new_mode.strip():
-                            if add_new_mode(new_mode.strip()):
-                                st.success(f"模式「{new_mode.strip()}」已添加")
-                                st.session_state.show_add_mode_actual = False
-                                st.rerun()
-                            else:
-                                st.error("模式已存在或添加失败")
-                        else:
-                            st.warning("请输入模式名称")
-                    if st.button("取消", key="actual_cancel_add"):
-                        st.session_state.show_add_mode_actual = False
-                        st.rerun()
-
-            st.subheader("📁 批量导入实测数据")
-            uploaded_file_actual = st.file_uploader("上传 CSV 或 Excel 文件（表头需与实测数据格式一致）",
-                                                    type=['csv', 'xlsx', 'xls'], key="actual_uploader")
-            if uploaded_file_actual is not None:
-                expected_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
-                df_upload, success = process_uploaded_file(uploaded_file_actual, expected_headers, is_actual=True)
-                if success:
-                    st.success(f"成功读取 {len(df_upload)} 条记录")
-                    st.dataframe(df_upload.head(10), width='stretch')
-                    if st.button("确认追加到实测数据", key="confirm_actual_upload"):
-                        df_existing = load_actual_data()
-                        df_new = pd.concat([df_existing, df_upload], ignore_index=True) if not df_existing.empty else df_upload
-                        save_actual_data(df_new)
-                        st.success(f"已追加 {len(df_upload)} 条实测数据")
-                        st.rerun()
-
-            st.subheader("✍️ 手动录入单条数据")
-            with st.form(key='actual_form', clear_on_submit=True):
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    input_model = st.text_input("机型", value="宝莱坞")
-                with col2:
-                    input_stage = st.selectbox("阶段", STAGE_OPTIONS)
-                with col3:
-                    st.text_input("模式", value=st.session_state.selected_mode_actual, disabled=True)
-                with col4:
-                    input_source = st.selectbox("数据来源", ["研发测试", "产线测试", "认证机构"])
-
-                st.subheader("2. 光学参数")
-                cols = st.columns(len(COMMON_FIELDS))
-                input_values = {}
-                for i, field in enumerate(COMMON_FIELDS):
-                    with cols[i]:
-                        input_values[field] = st.text_input(field, value="", key=f"actual_{field}",
-                                                            placeholder="留空或填入数字/文字")
-
-                st.subheader("3. 附加信息")
-                extra_cols = st.columns(len(ACTUAL_EXTRA_FIELDS))
-                input_extras = {}
-                for i, field in enumerate(ACTUAL_EXTRA_FIELDS):
-                    with extra_cols[i]:
-                        input_extras[field] = st.text_input(field)
-
-                if st.form_submit_button("保存实测数据"):
-                    converted = {f: safe_float_convert(input_values[f]) for f in COMMON_FIELDS}
-                    new_row = {
-                        "机型": input_model,
-                        "阶段": input_stage,
-                        "模式": st.session_state.selected_mode_actual,
-                        "数据来源": input_source,
-                        "实测/理论": "实测",
-                        **converted,
-                        **input_extras
-                    }
-                    df = load_actual_data()
-                    if df.empty:
-                        df = pd.DataFrame([new_row])
-                    else:
-                        for k in new_row:
-                            if k not in df.columns:
-                                df[k] = ""
-                        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                    save_actual_data(df)
-                    st.success("✅ 实测数据保存成功！")
-                    st.rerun()
-
-            st.markdown("---")
-            st.subheader("📜 实测历史数据管理")
-            df_actual = load_actual_data()
-            if not df_actual.empty:
-                display_df = format_dataframe_for_display(df_actual, COMMON_FIELDS)
-                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_actual", width='stretch')
-                if st.button("💾 保存实测表格修改"):
-                    for col in COMMON_FIELDS:
-                        if col in edited:
-                            edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
-                    save_actual_data(edited)
-                    st.success("实测历史数据已更新")
-                    st.rerun()
-            else:
-                st.info("暂无实测历史数据")
-
-    # -------------------- 理论数据 --------------------
-    with tab2:
-        st.header("理论数据录入")
-        if not st.session_state.theory_authenticated:
-            st.warning("请输入密码以查看和操作理论数据")
-            with st.form("theory_auth_form"):
-                pwd = st.text_input("密码", type="password")
-                if st.form_submit_button("验证"):
-                    if pwd == THEORY_PASSWORD:
-                        st.session_state.theory_authenticated = True
-                        st.rerun()
-                    else:
-                        st.error("密码错误")
-        else:
-            col_mode, col_add = st.columns([3, 1])
-            with col_mode:
-                mode_options = load_mode_options()
-                selected_mode = st.selectbox("模式", mode_options, key="theory_mode_select",
-                                             index=mode_options.index(st.session_state.selected_mode_theory) if st.session_state.selected_mode_theory in mode_options else 0)
-                st.session_state.selected_mode_theory = selected_mode
-            with col_add:
-                if st.button("➕ 新增模式", key="theory_add_mode_btn"):
-                    st.session_state.show_add_mode_theory = True
-            if st.session_state.show_add_mode_theory:
-                with st.popover("新增模式", use_container_width=True):
-                    new_mode = st.text_input("新模式名称", key="theory_new_mode_input")
-                    if st.button("确定添加", key="theory_confirm_add"):
-                        if new_mode and new_mode.strip():
-                            if add_new_mode(new_mode.strip()):
-                                st.success(f"模式「{new_mode.strip()}」已添加")
-                                st.session_state.show_add_mode_theory = False
-                                st.rerun()
-                            else:
-                                st.error("模式已存在或添加失败")
-                        else:
-                            st.warning("请输入模式名称")
-                    if st.button("取消", key="theory_cancel_add"):
-                        st.session_state.show_add_mode_theory = False
-                        st.rerun()
-
-            st.subheader("📁 批量导入理论数据")
-            uploaded_file_theory = st.file_uploader("上传 CSV 或 Excel 文件（表头需与理论数据格式一致）",
-                                                    type=['csv', 'xlsx', 'xls'], key="theory_uploader")
-            if uploaded_file_theory is not None:
-                expected_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
-                df_upload, success = process_uploaded_file(uploaded_file_theory, expected_headers, is_actual=False)
-                if success:
-                    st.success(f"成功读取 {len(df_upload)} 条记录")
-                    st.dataframe(df_upload.head(10), width='stretch')
-                    if st.button("确认追加到理论数据", key="confirm_theory_upload"):
-                        df_existing = load_theory_data()
-                        df_new = pd.concat([df_existing, df_upload], ignore_index=True) if not df_existing.empty else df_upload
-                        save_theory_data(df_new)
-                        st.success(f"已追加 {len(df_upload)} 条理论数据")
-                        st.rerun()
-
-            st.subheader("✍️ 手动录入单条数据")
-            with st.form(key='theory_form', clear_on_submit=True):
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    input_model = st.text_input("机型", value="宝莱坞", key="t_model")
-                with col2:
-                    input_stage = st.selectbox("阶段", STAGE_OPTIONS, key="t_stage")
-                with col3:
-                    st.text_input("模式", value=st.session_state.selected_mode_theory, disabled=True)
-                with col4:
-                    input_eval_obj = st.selectbox("评估对象", EVALUATION_OBJECTS, key="t_eval")
-                
-                st.info("📌 理论数据的数据来源固定为：理论评估")
-                st.subheader("2. 光学参数")
-                cols = st.columns(len(COMMON_FIELDS))
-                input_values = {}
-                for i, field in enumerate(COMMON_FIELDS):
-                    with cols[i]:
-                        input_values[field] = st.text_input(field, value="", key=f"theory_{field}",
-                                                            placeholder="留空或填入数字/文字")
-                
-                st.subheader("3. 附加信息")
-                extra_cols = st.columns(len(THEORY_EXTRA_FIELDS))
-                input_extras = {}
-                with extra_cols[0]:
-                    input_extras["照度计型号"] = st.text_input("照度计型号", key="t_luxmeter")
-                with extra_cols[1]:
-                    input_extras["备注"] = st.text_input("备注", key="t_remark")
-
-                if st.form_submit_button("保存理论数据"):
-                    converted = {f: safe_float_convert(input_values[f]) for f in COMMON_FIELDS}
-                    new_row = {
-                        "机型": input_model,
-                        "阶段": input_stage,
-                        "模式": st.session_state.selected_mode_theory,
-                        "数据来源": "理论评估",
-                        "实测/理论": "理论",
-                        **converted,
-                        "评估对象": input_eval_obj,
-                        "照度计型号": input_extras["照度计型号"],
-                        "备注": input_extras["备注"]
-                    }
-                    df = load_theory_data()
-                    if df.empty:
-                        df = pd.DataFrame([new_row])
-                    else:
-                        for k in new_row:
-                            if k not in df.columns:
-                                df[k] = ""
-                        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                    save_theory_data(df)
-                    st.success("✅ 理论数据保存成功！")
-                    st.rerun()
-
-            st.markdown("---")
-            st.subheader("📜 理论历史数据管理")
-            col_refresh, _ = st.columns([1, 5])
-            with col_refresh:
-                if st.button("🔄 刷新理论数据", key="refresh_theory"):
-                    st.cache_data.clear()
-                    st.rerun()
-            df_theory = load_theory_data()
-            if not df_theory.empty:
-                display_df = format_dataframe_for_display(df_theory, COMMON_FIELDS)
-                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_theory", width='stretch')
-                if st.button("💾 保存理论表格修改"):
-                    for col in COMMON_FIELDS:
-                        if col in edited:
-                            edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
-                    for col in ["评估对象", "照度计型号", "备注"]:
-                        if col not in edited.columns:
-                            edited[col] = None
-                    edited['数据来源'] = '理论评估'
-                    save_theory_data(edited)
-                    st.success("理论历史数据已更新")
-                    st.rerun()
-            else:
-                st.info("暂无理论历史数据")
-                with st.expander("💡 数据不显示怎么办？"):
-                    st.markdown("""
-                    - 请检查 Google Sheets 中的「理论数据」工作表，确保表头包含：机型、阶段、模式、数据来源、实测/理论、亮度、色点x、...、评估对象、照度计型号、备注。
-                    - 如果表头不匹配，可以删除该工作表（先备份数据），程序会自动重建。
-                    - 点击上方的「刷新理论数据」按钮清除缓存。
-                    """)
-
     # -------------------- 数据分析查询（整合版） --------------------
-    with tab3:
+    with tab1:
         st.header("数据查询与分析")
         with st.expander("筛选条件", expanded=True):
             query_type = st.radio(
@@ -883,62 +643,271 @@ def main():
         else:
             st.info("暂无平均值记录，请勾选数据行后点击「添加到平均值对比」")
 
-    # -------------------- 光机信息 --------------------
-    with tab4:
-        st.header("光机信息查询与管理")
-        st.markdown("此表格用于记录各机型的光机相关信息。默认字段：**机型、DMD型号、光源型号、DMD温度（含余量）**。")
-        st.markdown("您可以通过下方按钮添加自定义列（新字段），然后在表格中录入数据。所有列均会保存到 Google Sheets。")
-        
-        df_optics = load_optics_data()
-        col_new, _ = st.columns([2, 3])
-        with col_new:
-            new_col_name = st.text_input("新字段名称（列名）", key="new_optics_col", placeholder="例如：透镜型号")
-            if st.button("➕ 添加自定义字段", key="add_optics_col"):
-                if new_col_name and new_col_name.strip():
-                    new_col = new_col_name.strip()
-                    if new_col not in df_optics.columns:
-                        df_optics[new_col] = None
-                        st.success(f"已添加字段: {new_col}")
-                        save_optics_data(df_optics)
+    # -------------------- 实测数据 --------------------
+    with tab2:
+        st.header("实测数据录入")
+        if not st.session_state.actual_authenticated:
+            st.warning("请输入密码以查看和操作实测数据")
+            with st.form("actual_auth_form"):
+                pwd = st.text_input("密码", type="password")
+                if st.form_submit_button("验证"):
+                    if pwd == ACTUAL_PASSWORD:
+                        st.session_state.actual_authenticated = True
                         st.rerun()
                     else:
-                        st.warning("该字段已存在")
-                else:
-                    st.warning("请输入字段名称")
-        
-        if not df_optics.empty:
-            default_cols = [c for c in DEFAULT_OPTICS_FIELDS if c in df_optics.columns]
-            custom_cols = [c for c in df_optics.columns if c not in DEFAULT_OPTICS_FIELDS]
-            ordered_cols = default_cols + custom_cols
-            df_optics = df_optics[ordered_cols]
-            edited_df = st.data_editor(
-                df_optics,
-                num_rows="dynamic",
-                width='stretch',
-                key="optics_editor",
-                column_config={col: st.column_config.TextColumn(col) for col in df_optics.columns}
-            )
-            if st.button("💾 保存光机信息", key="save_optics"):
-                save_optics_data(edited_df)
-                st.success("光机信息已保存！")
-                st.rerun()
+                        st.error("密码错误")
         else:
-            empty_df = pd.DataFrame(columns=DEFAULT_OPTICS_FIELDS)
-            edited_df = st.data_editor(
-                empty_df,
-                num_rows="dynamic",
-                width='stretch',
-                key="optics_editor_empty",
-                column_config={col: st.column_config.TextColumn(col) for col in DEFAULT_OPTICS_FIELDS}
-            )
-            if st.button("💾 保存光机信息", key="save_optics_empty"):
-                save_optics_data(edited_df)
-                st.success("光机信息已保存！")
-                st.rerun()
-        st.caption("提示：在表格最后一行下方点击“+”可添加新行；通过上方的输入框可以添加自定义列（新字段），添加后请点击保存。")
+            col_mode, col_add = st.columns([3, 1])
+            with col_mode:
+                mode_options = load_mode_options()
+                selected_mode = st.selectbox("模式", mode_options, key="actual_mode_select",
+                                             index=mode_options.index(st.session_state.selected_mode_actual) if st.session_state.selected_mode_actual in mode_options else 0)
+                st.session_state.selected_mode_actual = selected_mode
+            with col_add:
+                if st.button("➕ 新增模式", key="actual_add_mode_btn"):
+                    st.session_state.show_add_mode_actual = True
+            if st.session_state.show_add_mode_actual:
+                with st.popover("新增模式", use_container_width=True):
+                    new_mode = st.text_input("新模式名称", key="actual_new_mode_input")
+                    if st.button("确定添加", key="actual_confirm_add"):
+                        if new_mode and new_mode.strip():
+                            if add_new_mode(new_mode.strip()):
+                                st.success(f"模式「{new_mode.strip()}」已添加")
+                                st.session_state.show_add_mode_actual = False
+                                st.rerun()
+                            else:
+                                st.error("模式已存在或添加失败")
+                        else:
+                            st.warning("请输入模式名称")
+                    if st.button("取消", key="actual_cancel_add"):
+                        st.session_state.show_add_mode_actual = False
+                        st.rerun()
 
-    # -------------------- 散热数据 --------------------
-    with tab5:
+            st.subheader("📁 批量导入实测数据")
+            uploaded_file_actual = st.file_uploader("上传 CSV 或 Excel 文件（表头需与实测数据格式一致）",
+                                                    type=['csv', 'xlsx', 'xls'], key="actual_uploader")
+            if uploaded_file_actual is not None:
+                expected_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
+                df_upload, success = process_uploaded_file(uploaded_file_actual, expected_headers, is_actual=True)
+                if success:
+                    st.success(f"成功读取 {len(df_upload)} 条记录")
+                    st.dataframe(df_upload.head(10), width='stretch')
+                    if st.button("确认追加到实测数据", key="confirm_actual_upload"):
+                        df_existing = load_actual_data()
+                        df_new = pd.concat([df_existing, df_upload], ignore_index=True) if not df_existing.empty else df_upload
+                        save_actual_data(df_new)
+                        st.success(f"已追加 {len(df_upload)} 条实测数据")
+                        st.rerun()
+
+            st.subheader("✍️ 手动录入单条数据")
+            with st.form(key='actual_form', clear_on_submit=True):
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    input_model = st.text_input("机型", value="宝莱坞")
+                with col2:
+                    input_stage = st.selectbox("阶段", STAGE_OPTIONS)
+                with col3:
+                    st.text_input("模式", value=st.session_state.selected_mode_actual, disabled=True)
+                with col4:
+                    input_source = st.selectbox("数据来源", ["研发测试", "产线测试", "认证机构"])
+
+                st.subheader("2. 光学参数")
+                cols = st.columns(len(COMMON_FIELDS))
+                input_values = {}
+                for i, field in enumerate(COMMON_FIELDS):
+                    with cols[i]:
+                        input_values[field] = st.text_input(field, value="", key=f"actual_{field}",
+                                                            placeholder="留空或填入数字/文字")
+
+                st.subheader("3. 附加信息")
+                extra_cols = st.columns(len(ACTUAL_EXTRA_FIELDS))
+                input_extras = {}
+                for i, field in enumerate(ACTUAL_EXTRA_FIELDS):
+                    with extra_cols[i]:
+                        input_extras[field] = st.text_input(field)
+
+                if st.form_submit_button("保存实测数据"):
+                    converted = {f: safe_float_convert(input_values[f]) for f in COMMON_FIELDS}
+                    new_row = {
+                        "机型": input_model,
+                        "阶段": input_stage,
+                        "模式": st.session_state.selected_mode_actual,
+                        "数据来源": input_source,
+                        "实测/理论": "实测",
+                        **converted,
+                        **input_extras
+                    }
+                    df = load_actual_data()
+                    if df.empty:
+                        df = pd.DataFrame([new_row])
+                    else:
+                        for k in new_row:
+                            if k not in df.columns:
+                                df[k] = ""
+                        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    save_actual_data(df)
+                    st.success("✅ 实测数据保存成功！")
+                    st.rerun()
+
+            st.markdown("---")
+            st.subheader("📜 实测历史数据管理")
+            df_actual = load_actual_data()
+            if not df_actual.empty:
+                display_df = format_dataframe_for_display(df_actual, COMMON_FIELDS)
+                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_actual", width='stretch')
+                if st.button("💾 保存实测表格修改"):
+                    for col in COMMON_FIELDS:
+                        if col in edited:
+                            edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
+                    save_actual_data(edited)
+                    st.success("实测历史数据已更新")
+                    st.rerun()
+            else:
+                st.info("暂无实测历史数据")
+
+    # -------------------- 理论数据 --------------------
+    with tab3:
+        st.header("理论数据录入")
+        if not st.session_state.theory_authenticated:
+            st.warning("请输入密码以查看和操作理论数据")
+            with st.form("theory_auth_form"):
+                pwd = st.text_input("密码", type="password")
+                if st.form_submit_button("验证"):
+                    if pwd == THEORY_PASSWORD:
+                        st.session_state.theory_authenticated = True
+                        st.rerun()
+                    else:
+                        st.error("密码错误")
+        else:
+            col_mode, col_add = st.columns([3, 1])
+            with col_mode:
+                mode_options = load_mode_options()
+                selected_mode = st.selectbox("模式", mode_options, key="theory_mode_select",
+                                             index=mode_options.index(st.session_state.selected_mode_theory) if st.session_state.selected_mode_theory in mode_options else 0)
+                st.session_state.selected_mode_theory = selected_mode
+            with col_add:
+                if st.button("➕ 新增模式", key="theory_add_mode_btn"):
+                    st.session_state.show_add_mode_theory = True
+            if st.session_state.show_add_mode_theory:
+                with st.popover("新增模式", use_container_width=True):
+                    new_mode = st.text_input("新模式名称", key="theory_new_mode_input")
+                    if st.button("确定添加", key="theory_confirm_add"):
+                        if new_mode and new_mode.strip():
+                            if add_new_mode(new_mode.strip()):
+                                st.success(f"模式「{new_mode.strip()}」已添加")
+                                st.session_state.show_add_mode_theory = False
+                                st.rerun()
+                            else:
+                                st.error("模式已存在或添加失败")
+                        else:
+                            st.warning("请输入模式名称")
+                    if st.button("取消", key="theory_cancel_add"):
+                        st.session_state.show_add_mode_theory = False
+                        st.rerun()
+
+            st.subheader("📁 批量导入理论数据")
+            uploaded_file_theory = st.file_uploader("上传 CSV 或 Excel 文件（表头需与理论数据格式一致）",
+                                                    type=['csv', 'xlsx', 'xls'], key="theory_uploader")
+            if uploaded_file_theory is not None:
+                expected_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
+                df_upload, success = process_uploaded_file(uploaded_file_theory, expected_headers, is_actual=False)
+                if success:
+                    st.success(f"成功读取 {len(df_upload)} 条记录")
+                    st.dataframe(df_upload.head(10), width='stretch')
+                    if st.button("确认追加到理论数据", key="confirm_theory_upload"):
+                        df_existing = load_theory_data()
+                        df_new = pd.concat([df_existing, df_upload], ignore_index=True) if not df_existing.empty else df_upload
+                        save_theory_data(df_new)
+                        st.success(f"已追加 {len(df_upload)} 条理论数据")
+                        st.rerun()
+
+            st.subheader("✍️ 手动录入单条数据")
+            with st.form(key='theory_form', clear_on_submit=True):
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    input_model = st.text_input("机型", value="宝莱坞", key="t_model")
+                with col2:
+                    input_stage = st.selectbox("阶段", STAGE_OPTIONS, key="t_stage")
+                with col3:
+                    st.text_input("模式", value=st.session_state.selected_mode_theory, disabled=True)
+                with col4:
+                    input_eval_obj = st.selectbox("评估对象", EVALUATION_OBJECTS, key="t_eval")
+                
+                st.info("📌 理论数据的数据来源固定为：理论评估")
+                st.subheader("2. 光学参数")
+                cols = st.columns(len(COMMON_FIELDS))
+                input_values = {}
+                for i, field in enumerate(COMMON_FIELDS):
+                    with cols[i]:
+                        input_values[field] = st.text_input(field, value="", key=f"theory_{field}",
+                                                            placeholder="留空或填入数字/文字")
+                
+                st.subheader("3. 附加信息")
+                extra_cols = st.columns(len(THEORY_EXTRA_FIELDS))
+                input_extras = {}
+                with extra_cols[0]:
+                    input_extras["照度计型号"] = st.text_input("照度计型号", key="t_luxmeter")
+                with extra_cols[1]:
+                    input_extras["备注"] = st.text_input("备注", key="t_remark")
+
+                if st.form_submit_button("保存理论数据"):
+                    converted = {f: safe_float_convert(input_values[f]) for f in COMMON_FIELDS}
+                    new_row = {
+                        "机型": input_model,
+                        "阶段": input_stage,
+                        "模式": st.session_state.selected_mode_theory,
+                        "数据来源": "理论评估",
+                        "实测/理论": "理论",
+                        **converted,
+                        "评估对象": input_eval_obj,
+                        "照度计型号": input_extras["照度计型号"],
+                        "备注": input_extras["备注"]
+                    }
+                    df = load_theory_data()
+                    if df.empty:
+                        df = pd.DataFrame([new_row])
+                    else:
+                        for k in new_row:
+                            if k not in df.columns:
+                                df[k] = ""
+                        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    save_theory_data(df)
+                    st.success("✅ 理论数据保存成功！")
+                    st.rerun()
+
+            st.markdown("---")
+            st.subheader("📜 理论历史数据管理")
+            col_refresh, _ = st.columns([1, 5])
+            with col_refresh:
+                if st.button("🔄 刷新理论数据", key="refresh_theory"):
+                    st.cache_data.clear()
+                    st.rerun()
+            df_theory = load_theory_data()
+            if not df_theory.empty:
+                display_df = format_dataframe_for_display(df_theory, COMMON_FIELDS)
+                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_theory", width='stretch')
+                if st.button("💾 保存理论表格修改"):
+                    for col in COMMON_FIELDS:
+                        if col in edited:
+                            edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
+                    for col in ["评估对象", "照度计型号", "备注"]:
+                        if col not in edited.columns:
+                            edited[col] = None
+                    edited['数据来源'] = '理论评估'
+                    save_theory_data(edited)
+                    st.success("理论历史数据已更新")
+                    st.rerun()
+            else:
+                st.info("暂无理论历史数据")
+                with st.expander("💡 数据不显示怎么办？"):
+                    st.markdown("""
+                    - 请检查 Google Sheets 中的「理论数据」工作表，确保表头包含：机型、阶段、模式、数据来源、实测/理论、亮度、色点x、...、评估对象、照度计型号、备注。
+                    - 如果表头不匹配，可以删除该工作表（先备份数据），程序会自动重建。
+                    - 点击上方的「刷新理论数据」按钮清除缓存。
+                    """)
+
+    # -------------------- 散热数据录入 --------------------
+    with tab4:
         st.header("散热数据录入")
         if not st.session_state.thermal_authenticated:
             st.warning("请输入密码以查看和操作散热数据")
@@ -1067,6 +1036,54 @@ def main():
                 st.info("暂无散热历史数据")
                 with st.expander("💡 首次使用说明"):
                     st.markdown("请通过上方的表单录入第一条散热数据，或通过批量导入功能添加数据。")
+
+    # -------------------- 光机信息（无默认字段，用户自行添加） --------------------
+    with tab5:
+        st.header("光机信息查询与管理")
+        st.markdown("此表格用于记录各机型的光机相关信息。**默认无任何字段**，请通过下方按钮添加自定义列。")
+        st.markdown("点击「添加自定义字段」输入列名后，表格会增加对应列，您可以在表格中录入数据。")
+        
+        df_optics = load_optics_data()
+        
+        col_new, _ = st.columns([2, 3])
+        with col_new:
+            new_col_name = st.text_input("新字段名称（列名）", key="new_optics_col", placeholder="例如：机型、DMD型号、透镜型号等")
+            if st.button("➕ 添加自定义字段", key="add_optics_col"):
+                if new_col_name and new_col_name.strip():
+                    new_col = new_col_name.strip()
+                    if new_col not in df_optics.columns:
+                        df_optics[new_col] = None
+                        st.success(f"已添加字段: {new_col}")
+                        save_optics_data(df_optics)
+                        st.rerun()
+                    else:
+                        st.warning("该字段已存在")
+                else:
+                    st.warning("请输入字段名称")
+        
+        if not df_optics.empty:
+            # 让用户自由编辑表格
+            edited_df = st.data_editor(
+                df_optics,
+                num_rows="dynamic",
+                width='stretch',
+                key="optics_editor",
+                column_config={col: st.column_config.TextColumn(col) for col in df_optics.columns}
+            )
+            if st.button("💾 保存光机信息", key="save_optics"):
+                save_optics_data(edited_df)
+                st.success("光机信息已保存！")
+                st.rerun()
+        else:
+            # 空表格，引导用户添加列
+            st.info("当前没有任何字段，请使用上方输入框添加自定义字段。")
+            # 显示一个空的 data_editor 以便用户直接添加行（但需要先有列）
+            # 这里可以放一个提示，让用户先添加列
+            if st.button("➕ 先添加第一个字段（如：机型）"):
+                # 自动添加一个示例列？不，让用户手动输入
+                st.info("请在左侧输入框中输入字段名称后点击「添加自定义字段」")
+        
+        st.caption("提示：添加自定义字段后，表格会自动增加该列，您可以在表格中填写数据。支持动态增删行。")
 
 if __name__ == "__main__":
     main()
