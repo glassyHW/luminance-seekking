@@ -297,6 +297,7 @@ def format_dataframe_for_display(df, fields):
             df_display[col] = df_display[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
     return df_display
 
+# 通用文件上传处理（用于实测/理论）
 def process_uploaded_file(uploaded_file, expected_headers, is_actual=True):
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -322,6 +323,37 @@ def process_uploaded_file(uploaded_file, expected_headers, is_actual=True):
         else:
             df['实测/理论'] = '理论'
             df['数据来源'] = '理论评估'
+        return df, True
+    except Exception as e:
+        st.error(f"文件解析失败: {e}")
+        return None, False
+
+# 散热数据专用文件上传处理
+def process_thermal_uploaded_file(uploaded_file):
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, dtype=str)
+        else:
+            df = pd.read_excel(uploaded_file, dtype=str)
+        df.columns = df.columns.str.strip()
+        required_cols = ['机型', '阶段', '模式']
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            st.error(f"文件缺少必要列: {missing}")
+            return None, False
+        # 只保留 THERMAL_FIELDS 中的列，缺失的补空
+        for col in THERMAL_FIELDS:
+            if col not in df.columns:
+                df[col] = None
+        df = df[THERMAL_FIELDS]
+        df = df.replace(['nan', 'None', ''], None)
+        # 转换数值字段
+        numeric_fields = ["光机功耗", "整机功耗", "环境温度", "风扇转速", "灯温",
+                          "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
+                          "DMD电功耗", "DMD总功耗", "DMD余量"]
+        for col in numeric_fields:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda x: safe_float_convert(x) if x not in [None, ""] else None)
         return df, True
     except Exception as e:
         st.error(f"文件解析失败: {e}")
@@ -846,7 +878,7 @@ def main():
         
         st.caption("提示：在表格最后一行下方点击“+”可添加新行；通过上方的输入框可以添加自定义列（新字段），添加后请点击保存。")
 
-    # -------------------- 散热数据录入 --------------------
+    # -------------------- 散热数据录入（含批量导入） --------------------
     with tab5:
         st.header("散热数据录入")
         if not st.session_state.thermal_authenticated:
@@ -886,6 +918,33 @@ def main():
                         st.session_state.show_add_mode_thermal = False
                         st.rerun()
 
+            # 批量导入散热数据
+            st.subheader("📁 批量导入散热数据")
+            uploaded_file_thermal = st.file_uploader(
+                "上传 CSV 或 Excel 文件（表头需与散热数据格式一致）",
+                type=['csv', 'xlsx', 'xls'],
+                key="thermal_uploader"
+            )
+            if uploaded_file_thermal is not None:
+                df_upload, success = process_thermal_uploaded_file(uploaded_file_thermal)
+                if success:
+                    st.success(f"成功读取 {len(df_upload)} 条记录")
+                    st.dataframe(df_upload.head(10), use_container_width=True)
+                    if st.button("确认追加到散热数据", key="confirm_thermal_upload"):
+                        df_existing = load_thermal_data()
+                        if df_existing.empty:
+                            df_new = df_upload
+                        else:
+                            # 确保列对齐
+                            for col in THERMAL_FIELDS:
+                                if col not in df_existing.columns:
+                                    df_existing[col] = None
+                            df_new = pd.concat([df_existing, df_upload], ignore_index=True)
+                        save_thermal_data(df_new)
+                        st.success(f"已追加 {len(df_upload)} 条散热数据")
+                        st.rerun()
+
+            # 手动录入单条散热数据
             st.subheader("✍️ 手动录入单条散热数据")
             with st.form(key='thermal_form', clear_on_submit=True):
                 col1, col2, col3 = st.columns(3)
@@ -954,7 +1013,7 @@ def main():
             else:
                 st.info("暂无散热历史数据")
                 with st.expander("💡 首次使用说明"):
-                    st.markdown("请通过上方的表单录入第一条散热数据，表格将自动创建。")
+                    st.markdown("请通过上方的表单录入第一条散热数据，或通过批量导入功能添加数据。")
 
 if __name__ == "__main__":
     main()
