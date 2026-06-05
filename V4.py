@@ -506,7 +506,7 @@ def main():
                 df_upload, success = process_uploaded_file(uploaded_file_actual, expected_headers, is_actual=True)
                 if success:
                     st.success(f"成功读取 {len(df_upload)} 条记录")
-                    st.dataframe(df_upload.head(10), use_container_width=True)
+                    st.dataframe(df_upload.head(10), width='stretch')
                     if st.button("确认追加到实测数据", key="confirm_actual_upload"):
                         df_existing = load_actual_data()
                         df_new = pd.concat([df_existing, df_upload], ignore_index=True) if not df_existing.empty else df_upload
@@ -569,7 +569,7 @@ def main():
             df_actual = load_actual_data()
             if not df_actual.empty:
                 display_df = format_dataframe_for_display(df_actual, COMMON_FIELDS)
-                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_actual", use_container_width=True)
+                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_actual", width='stretch')
                 if st.button("💾 保存实测表格修改"):
                     for col in COMMON_FIELDS:
                         if col in edited:
@@ -628,7 +628,7 @@ def main():
                 df_upload, success = process_uploaded_file(uploaded_file_theory, expected_headers, is_actual=False)
                 if success:
                     st.success(f"成功读取 {len(df_upload)} 条记录")
-                    st.dataframe(df_upload.head(10), use_container_width=True)
+                    st.dataframe(df_upload.head(10), width='stretch')
                     if st.button("确认追加到理论数据", key="confirm_theory_upload"):
                         df_existing = load_theory_data()
                         df_new = pd.concat([df_existing, df_upload], ignore_index=True) if not df_existing.empty else df_upload
@@ -700,7 +700,7 @@ def main():
             df_theory = load_theory_data()
             if not df_theory.empty:
                 display_df = format_dataframe_for_display(df_theory, COMMON_FIELDS)
-                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_theory", use_container_width=True)
+                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_theory", width='stretch')
                 if st.button("💾 保存理论表格修改"):
                     for col in COMMON_FIELDS:
                         if col in edited:
@@ -830,7 +830,7 @@ def main():
             edited_df = st.data_editor(
                 display_df,
                 key="query_data_editor",
-                use_container_width=True,
+                width='stretch',
                 column_config={"_selected": st.column_config.CheckboxColumn("选择", default=False)},
                 hide_index=False,
             )
@@ -876,7 +876,7 @@ def main():
             for col in history_df.columns:
                 if col != '计算时间/类型' and pd.api.types.is_numeric_dtype(history_df[col]):
                     history_df[col] = history_df[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
-            st.dataframe(history_df, use_container_width=True)
+            st.dataframe(history_df, width='stretch')
             if st.button("🗑️ 清除所有平均值记录"):
                 st.session_state.avg_history = []
                 st.rerun()
@@ -914,7 +914,7 @@ def main():
             edited_df = st.data_editor(
                 df_optics,
                 num_rows="dynamic",
-                use_container_width=True,
+                width='stretch',
                 key="optics_editor",
                 column_config={col: st.column_config.TextColumn(col) for col in df_optics.columns}
             )
@@ -927,7 +927,7 @@ def main():
             edited_df = st.data_editor(
                 empty_df,
                 num_rows="dynamic",
-                use_container_width=True,
+                width='stretch',
                 key="optics_editor_empty",
                 column_config={col: st.column_config.TextColumn(col) for col in DEFAULT_OPTICS_FIELDS}
             )
@@ -984,7 +984,7 @@ def main():
                 df_upload, success = process_thermal_uploaded_file(uploaded_file_thermal)
                 if success:
                     st.success(f"成功读取 {len(df_upload)} 条记录")
-                    st.dataframe(df_upload.head(10), use_container_width=True)
+                    st.dataframe(df_upload.head(10), width='stretch')
                     if st.button("确认追加到散热数据", key="confirm_thermal_upload"):
                         df_existing = load_thermal_data()
                         if df_existing.empty:
@@ -1055,7 +1055,7 @@ def main():
             if not df_thermal.empty:
                 numeric_fields = [f for f in THERMAL_FIELDS if f not in ["机型", "阶段", "模式"]]
                 display_df = format_dataframe_for_display(df_thermal, numeric_fields)
-                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_thermal", use_container_width=True)
+                edited = st.data_editor(display_df, num_rows="dynamic", key="edit_thermal", width='stretch')
                 if st.button("💾 保存散热表格修改"):
                     for col in numeric_fields:
                         if col in edited:
