@@ -33,8 +33,6 @@ THERMAL_FIELDS = [
     "灯温", "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
     "DMD电功耗", "DMD总功耗", "DMD spec", "DMD-TP1", "DMD余量"
 ]
-
-# 散热数据中可用于平均值的数值字段（排除机型、阶段、模式）
 THERMAL_AVG_FIELDS = [f for f in THERMAL_FIELDS if f not in ["机型", "阶段", "模式"]]
 
 DEFAULT_OPTICS_FIELDS = ["机型", "DMD型号", "光源型号", "DMD温度（含余量）"]
@@ -189,7 +187,7 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
             st.error(f"保存失败: {e}")
             raise
 
-# ================== 模式配置（带缓存和重试） ==================
+# ================== 模式配置 ==================
 @st.cache_data(ttl=300)
 def load_mode_options():
     for attempt in range(3):
@@ -225,7 +223,7 @@ def add_new_mode(mode_name):
     st.cache_data.clear()
     return True
 
-# ================== 业务函数（带缓存） ==================
+# ================== 业务函数 ==================
 def init_sheets():
     actual_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
     theory_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
@@ -236,7 +234,7 @@ def init_sheets():
     ensure_worksheet_exists(WORKSHEET_THERMAL, thermal_headers)
     ensure_worksheet_exists(WORKSHEET_OPTICS, optics_headers)
     load_mode_options()
-    # 只在缺失列时保存（避免无效写入）
+    # 修复现有数据（仅补充缺失列）
     df_theory = load_theory_data()
     if "评估对象" not in df_theory.columns or "照度计型号" not in df_theory.columns or "备注" not in df_theory.columns:
         save_theory_data(df_theory)
@@ -244,7 +242,6 @@ def init_sheets():
     if "环境温度" not in df_actual.columns:
         df_actual["环境温度"] = None
         save_actual_data(df_actual)
-    # 光机信息不需要每次启动都保存
 
 @st.cache_data(ttl=300)
 def load_actual_data():
@@ -300,7 +297,6 @@ def format_dataframe_for_display(df, fields):
             df_display[col] = df_display[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
     return df_display
 
-# 通用文件上传处理（用于实测/理论）
 def process_uploaded_file(uploaded_file, expected_headers, is_actual=True):
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -331,7 +327,6 @@ def process_uploaded_file(uploaded_file, expected_headers, is_actual=True):
         st.error(f"文件解析失败: {e}")
         return None, False
 
-# 散热数据专用文件上传处理
 def process_thermal_uploaded_file(uploaded_file):
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -360,7 +355,7 @@ def process_thermal_uploaded_file(uploaded_file):
         st.error(f"文件解析失败: {e}")
         return None, False
 
-# ================== 查询结果交互函数（修改平均值支持对比） ==================
+# ================== 查询交互函数 ==================
 def move_selected_row_up(current_df):
     if '_selected' not in current_df.columns:
         current_df['_selected'] = False
@@ -402,23 +397,17 @@ def move_selected_row_down(current_df):
     return moved_df
 
 def compute_average_of_selected(current_df, avg_fields, query_type):
-    """计算选中行的平均值，并返回带描述的平均值Series"""
     if '_selected' not in current_df.columns:
-        st.warning("没有可选中的行")
         return None
     selected_df = current_df[current_df['_selected'] == True]
     if selected_df.empty:
-        st.warning("请先勾选要计算平均值的行")
         return None
-    # 选取存在的数值字段
     available_fields = [col for col in avg_fields if col in selected_df.columns]
     if not available_fields:
-        st.warning("没有可计算平均值的数字字段")
         return None
     for col in available_fields:
         selected_df[col] = pd.to_numeric(selected_df[col], errors='coerce')
     means = selected_df[available_fields].mean()
-    # 添加描述信息：时间戳 + 选中行数 + 查询类型
     desc = f"{datetime.now().strftime('%H:%M:%S')} | {query_type} | 选中 {len(selected_df)} 行"
     return desc, means
 
@@ -447,9 +436,9 @@ def init_session_state():
     if 'query_result_df' not in st.session_state:
         st.session_state.query_result_df = None
     if 'query_type' not in st.session_state:
-        st.session_state.query_type = "亮度数据"   # 默认亮度数据
+        st.session_state.query_type = "亮度数据"
     if 'avg_history' not in st.session_state:
-        st.session_state.avg_history = []   # 存储 (描述, DataFrame行) 的列表
+        st.session_state.avg_history = []
     if 'optics_custom_columns' not in st.session_state:
         st.session_state.optics_custom_columns = []
 
@@ -732,27 +721,23 @@ def main():
                     - 点击上方的「刷新理论数据」按钮清除缓存。
                     """)
 
-    # -------------------- 数据分析查询（修改版） --------------------
+    # -------------------- 数据分析查询（整合版） --------------------
     with tab3:
         st.header("数据查询与分析")
-        
-        # 新增查询类型选择
-        query_type = st.radio(
-            "查询类型",
-            ["亮度数据", "散热数据"],
-            horizontal=True,
-            key="query_type_radio"
-        )
-        st.session_state.query_type = query_type
-        
         with st.expander("筛选条件", expanded=True):
+            query_type = st.radio(
+                "查询类型",
+                ["亮度数据", "散热数据"],
+                horizontal=True,
+                key="query_type_radio_in_expander"
+            )
+            st.session_state.query_type = query_type
+            
             if st.button("+ 添加筛选组"):
                 st.session_state.filter_groups.append({'id': len(st.session_state.filter_groups)})
                 st.rerun()
             all_filters = []
             dynamic_mode_options = ["全部"] + load_mode_options()
-            
-            # 根据查询类型决定是否显示数据来源筛选
             show_source_filter = (query_type == "亮度数据")
             
             for i, g in enumerate(st.session_state.filter_groups):
@@ -760,7 +745,7 @@ def main():
                 if show_source_filter:
                     cols = st.columns([2,1,1,2,1])
                 else:
-                    cols = st.columns([2,1,1,1])  # 少一列数据来源
+                    cols = st.columns([2,1,1,1])
                 with cols[0]:
                     f_model = st.text_input("机型", key=f"model_{i}")
                 with cols[1]:
@@ -809,7 +794,7 @@ def main():
                         st.success(f"查询结果 (共 {len(final)} 条)")
                         final['_selected'] = False
                         st.session_state.query_result_df = final
-            else:  # 散热数据
+            else:
                 df_thermal = load_thermal_data()
                 if df_thermal.empty:
                     st.warning("暂无散热数据")
@@ -838,11 +823,7 @@ def main():
             df_current = st.session_state.query_result_df
             display_cols = [c for c in df_current.columns if c != '_selected']
             display_df = df_current[display_cols].copy()
-            # 根据查询类型选择要格式化的字段
-            if query_type == "亮度数据":
-                format_fields = COMMON_FIELDS
-            else:
-                format_fields = THERMAL_AVG_FIELDS
+            format_fields = COMMON_FIELDS if query_type == "亮度数据" else THERMAL_AVG_FIELDS
             display_df = format_dataframe_for_display(display_df, format_fields)
             display_df.insert(0, '_selected', df_current['_selected'])
             
@@ -874,19 +855,10 @@ def main():
             with col3:
                 if st.button("📊 添加到平均值对比"):
                     if st.session_state.query_result_df is not None:
-                        # 确定数值字段
-                        if query_type == "亮度数据":
-                            avg_fields = AVG_FIELDS
-                        else:
-                            avg_fields = THERMAL_AVG_FIELDS
-                        result = compute_average_of_selected(
-                            st.session_state.query_result_df, 
-                            avg_fields,
-                            query_type
-                        )
-                        if result is not None:
+                        avg_fields = AVG_FIELDS if query_type == "亮度数据" else THERMAL_AVG_FIELDS
+                        result = compute_average_of_selected(st.session_state.query_result_df, avg_fields, query_type)
+                        if result:
                             desc, means = result
-                            # 将 Series 转为 DataFrame 的一行，方便展示
                             mean_row = means.to_frame().T
                             mean_row.insert(0, '计算时间/类型', desc)
                             st.session_state.avg_history.append(mean_row)
@@ -897,13 +869,10 @@ def main():
         else:
             st.info("请设置筛选条件并点击「执行查询」")
         
-        # 显示历史平均值对比
         if st.session_state.avg_history:
             st.markdown("---")
             st.subheader("📈 平均值对比记录")
-            # 合并所有历史记录
             history_df = pd.concat(st.session_state.avg_history, ignore_index=True)
-            # 格式化数字列（保留5位小数）
             for col in history_df.columns:
                 if col != '计算时间/类型' and pd.api.types.is_numeric_dtype(history_df[col]):
                     history_df[col] = history_df[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
@@ -921,7 +890,6 @@ def main():
         st.markdown("您可以通过下方按钮添加自定义列（新字段），然后在表格中录入数据。所有列均会保存到 Google Sheets。")
         
         df_optics = load_optics_data()
-        
         col_new, _ = st.columns([2, 3])
         with col_new:
             new_col_name = st.text_input("新字段名称（列名）", key="new_optics_col", placeholder="例如：透镜型号")
@@ -943,7 +911,6 @@ def main():
             custom_cols = [c for c in df_optics.columns if c not in DEFAULT_OPTICS_FIELDS]
             ordered_cols = default_cols + custom_cols
             df_optics = df_optics[ordered_cols]
-            
             edited_df = st.data_editor(
                 df_optics,
                 num_rows="dynamic",
@@ -968,10 +935,9 @@ def main():
                 save_optics_data(edited_df)
                 st.success("光机信息已保存！")
                 st.rerun()
-        
         st.caption("提示：在表格最后一行下方点击“+”可添加新行；通过上方的输入框可以添加自定义列（新字段），添加后请点击保存。")
 
-    # -------------------- 散热数据录入（含批量导入） --------------------
+    # -------------------- 散热数据 --------------------
     with tab5:
         st.header("散热数据录入")
         if not st.session_state.thermal_authenticated:
@@ -1011,13 +977,9 @@ def main():
                         st.session_state.show_add_mode_thermal = False
                         st.rerun()
 
-            # 批量导入散热数据
             st.subheader("📁 批量导入散热数据")
-            uploaded_file_thermal = st.file_uploader(
-                "上传 CSV 或 Excel 文件（表头需与散热数据格式一致）",
-                type=['csv', 'xlsx', 'xls'],
-                key="thermal_uploader"
-            )
+            uploaded_file_thermal = st.file_uploader("上传 CSV 或 Excel 文件（表头需与散热数据格式一致）",
+                                                    type=['csv', 'xlsx', 'xls'], key="thermal_uploader")
             if uploaded_file_thermal is not None:
                 df_upload, success = process_thermal_uploaded_file(uploaded_file_thermal)
                 if success:
@@ -1036,7 +998,6 @@ def main():
                         st.success(f"已追加 {len(df_upload)} 条散热数据")
                         st.rerun()
 
-            # 手动录入单条散热数据
             st.subheader("✍️ 手动录入单条散热数据")
             with st.form(key='thermal_form', clear_on_submit=True):
                 col1, col2, col3 = st.columns(3)
