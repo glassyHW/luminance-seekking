@@ -35,9 +35,7 @@ THERMAL_FIELDS = [
 ]
 THERMAL_AVG_FIELDS = [f for f in THERMAL_FIELDS if f not in ["机型", "阶段", "模式"]]
 
-# 光机信息不再预设默认字段，改为空列表
-DEFAULT_OPTICS_FIELDS = []  # 删除默认字段，用户自行添加
-
+DEFAULT_OPTICS_FIELDS = []   # 光机信息无默认字段
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
 THERMAL_PASSWORD = "Aa888888"
@@ -83,18 +81,15 @@ def ensure_worksheet_exists(sheet_title, headers):
     try:
         ws = sh.worksheet(sheet_title)
         if not ws.get_all_values():
-            # 如果工作表为空且提供了表头，则写入表头；否则留空
             if headers:
                 ws.update([headers])
         return ws
     except gspread.exceptions.WorksheetNotFound:
-        # 创建新工作表，列数至少为1
         cols = len(headers) if headers else 1
         ws = sh.add_worksheet(title=sheet_title, rows=1, cols=cols)
         if headers:
             ws.update([headers])
         else:
-            # 若没有表头，写入一个空字符串占位，让用户自行添加
             ws.update([[""]])
         return ws
 
@@ -141,9 +136,7 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
                 if "环境温度" not in df.columns:
                     df["环境温度"] = None
 
-            # 光机信息不再自动补充默认字段，保留用户自定义列
             if worksheet_name == WORKSHEET_OPTICS and default_headers is not None:
-                # 若 default_headers 为空列表，则不添加任何列
                 if default_headers:
                     for col in default_headers:
                         if col not in df.columns:
@@ -187,11 +180,9 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
                     clean_rows.append([make_json_safe(cell) for cell in row])
                 ws.update(clean_rows)
             else:
-                # 空 DataFrame 时，如果工作表应该保留表头，则写入表头；否则清空
                 if df.columns.tolist():
                     ws.update([df.columns.tolist()])
                 else:
-                    # 完全空表，写入一个空白单元格占位
                     ws.update([[""]])
             return
         except gspread.exceptions.APIError as e:
@@ -246,13 +237,11 @@ def init_sheets():
     actual_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + ACTUAL_EXTRA_FIELDS
     theory_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
     thermal_headers = THERMAL_FIELDS.copy()
-    # 光机信息不再预设表头，传入空列表，确保工作表存在但不写入默认列
     ensure_worksheet_exists(WORKSHEET_ACTUAL, actual_headers)
     ensure_worksheet_exists(WORKSHEET_THEORY, theory_headers)
     ensure_worksheet_exists(WORKSHEET_THERMAL, thermal_headers)
-    ensure_worksheet_exists(WORKSHEET_OPTICS, [])  # 空表头，用户自行添加列
+    ensure_worksheet_exists(WORKSHEET_OPTICS, [])
     load_mode_options()
-    # 修复现有数据（仅补充缺失列）
     df_theory = load_theory_data()
     if "评估对象" not in df_theory.columns or "照度计型号" not in df_theory.columns or "备注" not in df_theory.columns:
         save_theory_data(df_theory)
@@ -277,7 +266,6 @@ def save_theory_data(df):
 
 @st.cache_data(ttl=300)
 def load_optics_data():
-    # 传入空列表作为默认表头，不自动补充任何列
     return load_data_from_sheet(WORKSHEET_OPTICS, default_headers=[])
 
 def save_optics_data(df):
@@ -374,55 +362,58 @@ def process_thermal_uploaded_file(uploaded_file):
         st.error(f"文件解析失败: {e}")
         return None, False
 
-# ================== 查询交互函数 ==================
-def move_selected_row_up(current_df):
-    if '_selected' not in current_df.columns:
-        current_df['_selected'] = False
-    current_df = current_df.reset_index(drop=True)
-    selected = current_df['_selected'] == True
+# ================== 独立表格的移动/平均值函数 ==================
+def move_selected_row_up_table(df, group_key):
+    if '_selected' not in df.columns:
+        df['_selected'] = False
+    df = df.reset_index(drop=True)
+    selected = df['_selected'] == True
     selected_idx = selected[selected].index.tolist()
     if not selected_idx:
-        st.warning("请先勾选要移动的行")
-        return current_df
+        st.warning(f"组 {group_key+1}：请先勾选要移动的行")
+        return df
     idx = selected_idx[0]
     if idx == 0:
-        st.warning("已经是第一行，无法上移")
-        return current_df
-    order = list(range(len(current_df)))
+        st.warning(f"组 {group_key+1}：已经是第一行，无法上移")
+        return df
+    order = list(range(len(df)))
     order[idx], order[idx-1] = order[idx-1], order[idx]
-    moved_df = current_df.iloc[order].reset_index(drop=True)
+    moved_df = df.iloc[order].reset_index(drop=True)
     moved_df['_selected'] = False
     moved_df.loc[idx-1, '_selected'] = True
     return moved_df
 
-def move_selected_row_down(current_df):
-    if '_selected' not in current_df.columns:
-        current_df['_selected'] = False
-    current_df = current_df.reset_index(drop=True)
-    selected = current_df['_selected'] == True
+def move_selected_row_down_table(df, group_key):
+    if '_selected' not in df.columns:
+        df['_selected'] = False
+    df = df.reset_index(drop=True)
+    selected = df['_selected'] == True
     selected_idx = selected[selected].index.tolist()
     if not selected_idx:
-        st.warning("请先勾选要移动的行")
-        return current_df
+        st.warning(f"组 {group_key+1}：请先勾选要移动的行")
+        return df
     idx = selected_idx[0]
-    if idx == len(current_df) - 1:
-        st.warning("已经是最后一行，无法下移")
-        return current_df
-    order = list(range(len(current_df)))
+    if idx == len(df) - 1:
+        st.warning(f"组 {group_key+1}：已经是最后一行，无法下移")
+        return df
+    order = list(range(len(df)))
     order[idx], order[idx+1] = order[idx+1], order[idx]
-    moved_df = current_df.iloc[order].reset_index(drop=True)
+    moved_df = df.iloc[order].reset_index(drop=True)
     moved_df['_selected'] = False
     moved_df.loc[idx+1, '_selected'] = True
     return moved_df
 
-def compute_average_of_selected(current_df, avg_fields, query_type):
-    if '_selected' not in current_df.columns:
+def compute_average_for_table(df, avg_fields, group_key, query_type):
+    if '_selected' not in df.columns:
+        st.warning(f"组 {group_key+1}：没有可选中的行")
         return None
-    selected_df = current_df[current_df['_selected'] == True]
+    selected_df = df[df['_selected'] == True]
     if selected_df.empty:
+        st.warning(f"组 {group_key+1}：请先勾选要计算平均值的行")
         return None
     available_fields = [col for col in avg_fields if col in selected_df.columns]
     if not available_fields:
+        st.warning(f"组 {group_key+1}：没有可计算平均值的数字字段")
         return None
     for col in available_fields:
         selected_df[col] = pd.to_numeric(selected_df[col], errors='coerce')
@@ -433,7 +424,12 @@ def compute_average_of_selected(current_df, avg_fields, query_type):
 # ================== Session 初始化 ==================
 def init_session_state():
     if 'filter_groups' not in st.session_state:
-        st.session_state.filter_groups = [{'id': 0}]
+        st.session_state.filter_groups = [{'id': 0, 'query_type': "亮度数据", 'filters': {"model": "", "stage": "全部", "mode": "全部", "source": "全部"}}]
+    for i, g in enumerate(st.session_state.filter_groups):
+        if 'query_type' not in g:
+            g['query_type'] = "亮度数据"
+        if 'filters' not in g:
+            g['filters'] = {"model": "", "stage": "全部", "mode": "全部", "source": "全部"}
     if 'actual_authenticated' not in st.session_state:
         st.session_state.actual_authenticated = False
     if 'theory_authenticated' not in st.session_state:
@@ -452,14 +448,10 @@ def init_session_state():
         st.session_state.show_add_mode_theory = False
     if 'show_add_mode_thermal' not in st.session_state:
         st.session_state.show_add_mode_thermal = False
-    if 'query_result_df' not in st.session_state:
-        st.session_state.query_result_df = None
-    if 'query_type' not in st.session_state:
-        st.session_state.query_type = "亮度数据"
-    if 'avg_history' not in st.session_state:
-        st.session_state.avg_history = []
-    if 'optics_custom_columns' not in st.session_state:
-        st.session_state.optics_custom_columns = []
+    if 'group_results' not in st.session_state:
+        st.session_state.group_results = {}
+    if 'group_avg_history' not in st.session_state:
+        st.session_state.group_avg_history = {}
 
 # ================== 主程序 UI ==================
 def main():
@@ -472,7 +464,6 @@ def main():
             init_sheets()
             st.session_state.sheets_initialized = True
 
-    # 调整 Tab 顺序：数据分析放在第一位，光机信息放在最后一位
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "【查询】数据分析",
         "【录入】实测数据",
@@ -481,169 +472,179 @@ def main():
         "【查询】光机信息"
     ])
 
-    # -------------------- 数据分析查询（整合版） --------------------
+    # -------------------- 数据分析查询（多组独立） --------------------
     with tab1:
         st.header("数据查询与分析")
-        with st.expander("筛选条件", expanded=True):
-            query_type = st.radio(
-                "查询类型",
-                ["亮度数据", "散热数据"],
-                horizontal=True,
-                key="query_type_radio_in_expander"
-            )
-            st.session_state.query_type = query_type
-            
+        with st.expander("筛选组管理", expanded=True):
             if st.button("+ 添加筛选组"):
-                st.session_state.filter_groups.append({'id': len(st.session_state.filter_groups)})
+                new_id = len(st.session_state.filter_groups)
+                st.session_state.filter_groups.append({
+                    'id': new_id,
+                    'query_type': "亮度数据",
+                    'filters': {"model": "", "stage": "全部", "mode": "全部", "source": "全部"}
+                })
                 st.rerun()
-            all_filters = []
-            dynamic_mode_options = ["全部"] + load_mode_options()
-            show_source_filter = (query_type == "亮度数据")
             
-            for i, g in enumerate(st.session_state.filter_groups):
-                st.markdown(f"**筛选组 {i+1}**")
-                if show_source_filter:
-                    cols = st.columns([2,1,1,2,1])
-                else:
-                    cols = st.columns([2,1,1,1])
+            for i, group in enumerate(st.session_state.filter_groups):
+                st.markdown(f"---\n#### 筛选组 {i+1}")
+                cols = st.columns([2, 2, 2, 2, 1])
                 with cols[0]:
-                    f_model = st.text_input("机型", key=f"model_{i}")
+                    new_query_type = st.selectbox(
+                        "查询类型",
+                        ["亮度数据", "散热数据"],
+                        index=0 if group['query_type'] == "亮度数据" else 1,
+                        key=f"group_query_type_{i}"
+                    )
+                    group['query_type'] = new_query_type
                 with cols[1]:
-                    f_stage = st.selectbox("阶段", ["全部"]+STAGE_OPTIONS, key=f"stage_{i}")
+                    model = st.text_input("机型", value=group['filters']['model'], key=f"group_model_{i}")
+                    group['filters']['model'] = model
                 with cols[2]:
-                    f_mode = st.selectbox("模式", dynamic_mode_options, key=f"mode_{i}")
-                if show_source_filter:
-                    with cols[3]:
-                        f_source = st.selectbox("数据来源", ["全部"]+SOURCE_OPTIONS, key=f"source_{i}")
-                    with cols[4]:
-                        if st.button("删除", key=f"del_{i}"):
-                            st.session_state.filter_groups.pop(i)
-                            st.rerun()
-                    all_filters.append({"model":f_model, "stage":f_stage, "mode":f_mode, "source":f_source})
-                else:
-                    with cols[3]:
-                        if st.button("删除", key=f"del_{i}"):
-                            st.session_state.filter_groups.pop(i)
-                            st.rerun()
-                    all_filters.append({"model":f_model, "stage":f_stage, "mode":f_mode})
-        
-        if st.button("执行查询", type="primary"):
-            if query_type == "亮度数据":
-                df_all = get_data_with_source()
-                if df_all.empty:
-                    st.warning("暂无任何亮度数据")
-                    st.session_state.query_result_df = None
-                else:
-                    final = pd.DataFrame()
-                    for f in all_filters:
-                        mask = pd.Series([True]*len(df_all))
-                        if f['model']:
-                            mask &= df_all['机型'].str.contains(f['model'], case=False, na=False)
-                        if f['stage'] != "全部":
-                            mask &= df_all['阶段'] == f['stage']
-                        if f['mode'] != "全部":
-                            mask &= df_all['模式'] == f['mode']
-                        if 'source' in f and f['source'] != "全部":
-                            mask &= df_all['数据来源'] == f['source']
-                        final = pd.concat([final, df_all[mask]])
-                    final.drop_duplicates(inplace=True)
-                    if final.empty:
-                        st.info("未找到符合条件的数据")
-                        st.session_state.query_result_df = None
-                    else:
-                        st.success(f"查询结果 (共 {len(final)} 条)")
-                        final['_selected'] = False
-                        st.session_state.query_result_df = final
-            else:
-                df_thermal = load_thermal_data()
-                if df_thermal.empty:
-                    st.warning("暂无散热数据")
-                    st.session_state.query_result_df = None
-                else:
-                    final = pd.DataFrame()
-                    for f in all_filters:
-                        mask = pd.Series([True]*len(df_thermal))
-                        if f['model']:
-                            mask &= df_thermal['机型'].str.contains(f['model'], case=False, na=False)
-                        if f['stage'] != "全部":
-                            mask &= df_thermal['阶段'] == f['stage']
-                        if f['mode'] != "全部":
-                            mask &= df_thermal['模式'] == f['mode']
-                        final = pd.concat([final, df_thermal[mask]])
-                    final.drop_duplicates(inplace=True)
-                    if final.empty:
-                        st.info("未找到符合条件的数据")
-                        st.session_state.query_result_df = None
-                    else:
-                        st.success(f"查询结果 (共 {len(final)} 条)")
-                        final['_selected'] = False
-                        st.session_state.query_result_df = final
-        
-        if st.session_state.query_result_df is not None and not st.session_state.query_result_df.empty:
-            df_current = st.session_state.query_result_df
-            display_cols = [c for c in df_current.columns if c != '_selected']
-            display_df = df_current[display_cols].copy()
-            format_fields = COMMON_FIELDS if query_type == "亮度数据" else THERMAL_AVG_FIELDS
-            display_df = format_dataframe_for_display(display_df, format_fields)
-            display_df.insert(0, '_selected', df_current['_selected'])
-            
-            edited_df = st.data_editor(
-                display_df,
-                key="query_data_editor",
-                width='stretch',
-                column_config={"_selected": st.column_config.CheckboxColumn("选择", default=False)},
-                hide_index=False,
-            )
-            if edited_df is not None and '_selected' in edited_df.columns:
-                st.session_state.query_result_df['_selected'] = edited_df['_selected']
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                if st.button("⬆️ 上移选中行"):
-                    current = st.session_state.query_result_df
-                    if current is not None and not current.empty:
-                        moved = move_selected_row_up(current)
-                        st.session_state.query_result_df = moved
+                    stage = st.selectbox("阶段", ["全部"] + STAGE_OPTIONS, index=0 if group['filters']['stage'] == "全部" else STAGE_OPTIONS.index(group['filters']['stage'])+1, key=f"group_stage_{i}")
+                    group['filters']['stage'] = stage
+                with cols[3]:
+                    mode_options = load_mode_options()
+                    mode_idx = 0
+                    if group['filters']['mode'] != "全部" and group['filters']['mode'] in mode_options:
+                        mode_idx = mode_options.index(group['filters']['mode']) + 1
+                    mode = st.selectbox("模式", ["全部"] + mode_options, index=mode_idx, key=f"group_mode_{i}")
+                    group['filters']['mode'] = mode
+                with cols[4]:
+                    if st.button("删除", key=f"del_group_{i}"):
+                        st.session_state.filter_groups.pop(i)
+                        # 清理存储
+                        keys_to_del = [k for k in st.session_state.group_results.keys() if k.endswith(f"_{i}") or k == f"result_{i}"]
+                        for k in keys_to_del:
+                            del st.session_state.group_results[k]
+                        if f"avg_history_{i}" in st.session_state.group_avg_history:
+                            del st.session_state.group_avg_history[f"avg_history_{i}"]
                         st.rerun()
-            with col2:
-                if st.button("⬇️ 下移选中行"):
-                    current = st.session_state.query_result_df
-                    if current is not None and not current.empty:
-                        moved = move_selected_row_down(current)
-                        st.session_state.query_result_df = moved
-                        st.rerun()
-            with col3:
-                if st.button("📊 添加到平均值对比"):
-                    if st.session_state.query_result_df is not None:
-                        avg_fields = AVG_FIELDS if query_type == "亮度数据" else THERMAL_AVG_FIELDS
-                        result = compute_average_of_selected(st.session_state.query_result_df, avg_fields, query_type)
-                        if result:
-                            desc, means = result
-                            mean_row = means.to_frame().T
-                            mean_row.insert(0, '计算时间/类型', desc)
-                            st.session_state.avg_history.append(mean_row)
-                            st.success(f"已记录平均值：{desc}")
-                            st.rerun()
-        elif st.session_state.query_result_df is not None and st.session_state.query_result_df.empty:
-            st.info("请执行查询以显示数据")
-        else:
-            st.info("请设置筛选条件并点击「执行查询」")
-        
-        if st.session_state.avg_history:
-            st.markdown("---")
-            st.subheader("📈 平均值对比记录")
-            history_df = pd.concat(st.session_state.avg_history, ignore_index=True)
-            for col in history_df.columns:
-                if col != '计算时间/类型' and pd.api.types.is_numeric_dtype(history_df[col]):
-                    history_df[col] = history_df[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
-            st.dataframe(history_df, width='stretch')
-            if st.button("🗑️ 清除所有平均值记录"):
-                st.session_state.avg_history = []
+                
+                if group['query_type'] == "亮度数据":
+                    source = st.selectbox("数据来源", ["全部"] + SOURCE_OPTIONS, index=0 if group['filters'].get('source', '全部') == "全部" else SOURCE_OPTIONS.index(group['filters'].get('source', '全部'))+1, key=f"group_source_{i}")
+                    group['filters']['source'] = source
+                else:
+                    group['filters']['source'] = None
+            
+            if st.button("执行所有查询", type="primary"):
+                for i, group in enumerate(st.session_state.filter_groups):
+                    query_type = group['query_type']
+                    filters = group['filters']
+                    if query_type == "亮度数据":
+                        df_all = get_data_with_source()
+                        if df_all.empty:
+                            st.session_state.group_results[f"result_{i}"] = pd.DataFrame()
+                        else:
+                            mask = pd.Series([True] * len(df_all))
+                            if filters['model']:
+                                mask &= df_all['机型'].str.contains(filters['model'], case=False, na=False)
+                            if filters['stage'] != "全部":
+                                mask &= df_all['阶段'] == filters['stage']
+                            if filters['mode'] != "全部":
+                                mask &= df_all['模式'] == filters['mode']
+                            if filters.get('source') and filters['source'] != "全部":
+                                mask &= df_all['数据来源'] == filters['source']
+                            final = df_all[mask].copy()
+                            if final.empty:
+                                st.session_state.group_results[f"result_{i}"] = pd.DataFrame()
+                            else:
+                                final['_selected'] = False
+                                st.session_state.group_results[f"result_{i}"] = final
+                    else:
+                        df_thermal = load_thermal_data()
+                        if df_thermal.empty:
+                            st.session_state.group_results[f"result_{i}"] = pd.DataFrame()
+                        else:
+                            mask = pd.Series([True] * len(df_thermal))
+                            if filters['model']:
+                                mask &= df_thermal['机型'].str.contains(filters['model'], case=False, na=False)
+                            if filters['stage'] != "全部":
+                                mask &= df_thermal['阶段'] == filters['stage']
+                            if filters['mode'] != "全部":
+                                mask &= df_thermal['模式'] == filters['mode']
+                            final = df_thermal[mask].copy()
+                            if final.empty:
+                                st.session_state.group_results[f"result_{i}"] = pd.DataFrame()
+                            else:
+                                final['_selected'] = False
+                                st.session_state.group_results[f"result_{i}"] = final
                 st.rerun()
-        else:
-            st.info("暂无平均值记录，请勾选数据行后点击「添加到平均值对比」")
+        
+        # 显示每个组的查询结果
+        for i, group in enumerate(st.session_state.filter_groups):
+            result_key = f"result_{i}"
+            if result_key in st.session_state.group_results:
+                df = st.session_state.group_results[result_key]
+                if df is not None and not df.empty:
+                    st.markdown(f"#### 筛选组 {i+1} 查询结果")
+                    query_type = group['query_type']
+                    display_cols = [c for c in df.columns if c != '_selected']
+                    display_df = df[display_cols].copy()
+                    format_fields = COMMON_FIELDS if query_type == "亮度数据" else THERMAL_AVG_FIELDS
+                    display_df = format_dataframe_for_display(display_df, format_fields)
+                    display_df.insert(0, '_selected', df['_selected'])
+                    
+                    edited_df = st.data_editor(
+                        display_df,
+                        key=f"query_result_editor_{i}",
+                        width='stretch',
+                        column_config={"_selected": st.column_config.CheckboxColumn("选择", default=False)},
+                        hide_index=False,
+                    )
+                    if edited_df is not None and '_selected' in edited_df.columns:
+                        df['_selected'] = edited_df['_selected']
+                        st.session_state.group_results[result_key] = df
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        if st.button(f"⬆️ 上移选中行", key=f"up_{i}"):
+                            current = st.session_state.group_results[result_key]
+                            if current is not None and not current.empty:
+                                moved = move_selected_row_up_table(current, i)
+                                st.session_state.group_results[result_key] = moved
+                                st.rerun()
+                    with col2:
+                        if st.button(f"⬇️ 下移选中行", key=f"down_{i}"):
+                            current = st.session_state.group_results[result_key]
+                            if current is not None and not current.empty:
+                                moved = move_selected_row_down_table(current, i)
+                                st.session_state.group_results[result_key] = moved
+                                st.rerun()
+                    with col3:
+                        if st.button(f"📊 计算平均值", key=f"avg_{i}"):
+                            current = st.session_state.group_results[result_key]
+                            if current is not None and not current.empty:
+                                avg_fields = AVG_FIELDS if query_type == "亮度数据" else THERMAL_AVG_FIELDS
+                                result = compute_average_for_table(current, avg_fields, i, query_type)
+                                if result:
+                                    desc, means = result
+                                    mean_row = means.to_frame().T
+                                    mean_row.insert(0, '计算时间/类型', desc)
+                                    if f"avg_history_{i}" not in st.session_state.group_avg_history:
+                                        st.session_state.group_avg_history[f"avg_history_{i}"] = []
+                                    st.session_state.group_avg_history[f"avg_history_{i}"].append(mean_row)
+                                    st.success(f"组 {i+1}：已记录平均值：{desc}")
+                                    st.rerun()
+                    
+                    if f"avg_history_{i}" in st.session_state.group_avg_history and st.session_state.group_avg_history[f"avg_history_{i}"]:
+                        st.markdown(f"**组 {i+1} 平均值对比记录**")
+                        history_df = pd.concat(st.session_state.group_avg_history[f"avg_history_{i}"], ignore_index=True)
+                        for col in history_df.columns:
+                            if col != '计算时间/类型' and pd.api.types.is_numeric_dtype(history_df[col]):
+                                history_df[col] = history_df[col].apply(lambda x: f"{x:.5f}" if pd.notna(x) else "")
+                        st.dataframe(history_df, width='stretch')
+                        if st.button(f"🗑️ 清除组 {i+1} 平均值记录", key=f"clear_avg_{i}"):
+                            st.session_state.group_avg_history[f"avg_history_{i}"] = []
+                            st.rerun()
+                    st.markdown("---")
+                elif df is not None and df.empty:
+                    st.info(f"筛选组 {i+1} 查询结果为空，请调整筛选条件后重新执行查询。")
+                else:
+                    st.info(f"筛选组 {i+1} 尚未执行查询，请设置筛选条件后点击「执行所有查询」。")
+            else:
+                st.info(f"筛选组 {i+1} 尚未执行查询，请设置筛选条件后点击「执行所有查询」。")
 
-    # -------------------- 实测数据 --------------------
+    # -------------------- 实测数据录入 --------------------
     with tab2:
         st.header("实测数据录入")
         if not st.session_state.actual_authenticated:
@@ -765,7 +766,7 @@ def main():
             else:
                 st.info("暂无实测历史数据")
 
-    # -------------------- 理论数据 --------------------
+    # -------------------- 理论数据录入 --------------------
     with tab3:
         st.header("理论数据录入")
         if not st.session_state.theory_authenticated:
@@ -1062,7 +1063,6 @@ def main():
                     st.warning("请输入字段名称")
         
         if not df_optics.empty:
-            # 让用户自由编辑表格
             edited_df = st.data_editor(
                 df_optics,
                 num_rows="dynamic",
@@ -1075,12 +1075,8 @@ def main():
                 st.success("光机信息已保存！")
                 st.rerun()
         else:
-            # 空表格，引导用户添加列
             st.info("当前没有任何字段，请使用上方输入框添加自定义字段。")
-            # 显示一个空的 data_editor 以便用户直接添加行（但需要先有列）
-            # 这里可以放一个提示，让用户先添加列
             if st.button("➕ 先添加第一个字段（如：机型）"):
-                # 自动添加一个示例列？不，让用户手动输入
                 st.info("请在左侧输入框中输入字段名称后点击「添加自定义字段」")
         
         st.caption("提示：添加自定义字段后，表格会自动增加该列，您可以在表格中填写数据。支持动态增删行。")
