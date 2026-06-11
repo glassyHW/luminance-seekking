@@ -565,7 +565,22 @@ def main():
                         st.rerun()
                 
                 if group['query_type'] == "亮度数据":
-                    source = st.selectbox("数据来源", ["全部"] + SOURCE_OPTIONS, index=0 if group['filters'].get('source', '全部') == "全部" else SOURCE_OPTIONS.index(group['filters'].get('source', '全部'))+1, key=f"group_source_{i}")
+                    # ================== 修复点：安全处理数据来源下拉框的索引 ==================
+                    source_options = ["全部"] + SOURCE_OPTIONS
+                    current_source = group['filters'].get('source', '全部')
+                    # 如果当前值不在 source_options 中，默认选“全部”
+                    try:
+                        source_idx = source_options.index(current_source)
+                    except ValueError:
+                        source_idx = 0
+                        # 修复存储的非法值（可选，避免下次再出错）
+                        group['filters']['source'] = "全部"
+                    source = st.selectbox(
+                        "数据来源",
+                        source_options,
+                        index=source_idx,
+                        key=f"group_source_{i}"
+                    )
                     group['filters']['source'] = source
                 else:
                     group['filters']['source'] = None
