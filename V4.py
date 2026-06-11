@@ -35,7 +35,7 @@ THERMAL_FIELDS = [
 ]
 THERMAL_AVG_FIELDS = [f for f in THERMAL_FIELDS if f not in ["机型", "阶段", "模式"]]
 
-DEFAULT_OPTICS_FIELDS = []   # 光机信息无默认字段
+DEFAULT_OPTICS_FIELDS = []
 ACTUAL_PASSWORD = "Aa123456"
 THEORY_PASSWORD = "Aa654321"
 THERMAL_PASSWORD = "Aa888888"
@@ -362,6 +362,28 @@ def process_thermal_uploaded_file(uploaded_file):
         st.error(f"文件解析失败: {e}")
         return None, False
 
+# ================== 获取机型选项（带缓存） ==================
+@st.cache_data(ttl=300)
+def get_available_models_for_luminance():
+    """获取亮度数据（实测+理论）中的所有机型"""
+    df_actual = load_actual_data()
+    df_theory = load_theory_data()
+    models = set()
+    if not df_actual.empty and '机型' in df_actual.columns:
+        models.update(df_actual['机型'].dropna().unique())
+    if not df_theory.empty and '机型' in df_theory.columns:
+        models.update(df_theory['机型'].dropna().unique())
+    return sorted(["全部"] + list(models))
+
+@st.cache_data(ttl=300)
+def get_available_models_for_thermal():
+    """获取散热数据中的所有机型"""
+    df_thermal = load_thermal_data()
+    if df_thermal.empty or '机型' not in df_thermal.columns:
+        return ["全部"]
+    models = df_thermal['机型'].dropna().unique()
+    return sorted(["全部"] + list(models))
+
 # ================== 独立表格的移动/平均值函数 ==================
 def move_selected_row_up_table(df, group_key):
     if '_selected' not in df.columns:
@@ -424,12 +446,15 @@ def compute_average_for_table(df, avg_fields, group_key, query_type):
 # ================== Session 初始化 ==================
 def init_session_state():
     if 'filter_groups' not in st.session_state:
-        st.session_state.filter_groups = [{'id': 0, 'query_type': "亮度数据", 'filters': {"model": "", "stage": "全部", "mode": "全部", "source": "全部"}}]
+        st.session_state.filter_groups = [{'id': 0, 'query_type': "亮度数据", 'filters': {"model": "全部", "stage": "全部", "mode": "全部", "source": "全部"}}]
     for i, g in enumerate(st.session_state.filter_groups):
         if 'query_type' not in g:
             g['query_type'] = "亮度数据"
         if 'filters' not in g:
-            g['filters'] = {"model": "", "stage": "全部", "mode": "全部", "source": "全部"}
+            g['filters'] = {"model": "全部", "stage": "全部", "mode": "全部", "source": "全部"}
+        # 确保 model 字段存在且不为空字符串（兼容旧数据）
+        if 'model' not in g['filters'] or g['filters']['model'] == "":
+            g['filters']['model'] = "全部"
     if 'actual_authenticated' not in st.session_state:
         st.session_state.actual_authenticated = False
     if 'theory_authenticated' not in st.session_state:
@@ -472,7 +497,7 @@ def main():
         "【查询】光机信息"
     ])
 
-    # -------------------- 数据分析查询（多组独立） --------------------
+    # -------------------- 数据分析查询（多组独立，机型改为下拉选择） --------------------
     with tab1:
         st.header("数据查询与分析")
         with st.expander("筛选组管理", expanded=True):
@@ -481,7 +506,7 @@ def main():
                 st.session_state.filter_groups.append({
                     'id': new_id,
                     'query_type': "亮度数据",
-                    'filters': {"model": "", "stage": "全部", "mode": "全部", "source": "全部"}
+                    'filters': {"model": "全部", "stage": "全部", "mode": "全部", "source": "全部"}
                 })
                 st.rerun()
             
@@ -495,10 +520,29 @@ def main():
                         index=0 if group['query_type'] == "亮度数据" else 1,
                         key=f"group_query_type_{i}"
                     )
-                    group['query_type'] = new_query_type
+                    if new_query_type != group['query_type']:
+                        group['query_type'] = new_query_type
+                        # 切换类型时重置机型选项为"全部"
+                        group['filters']['model'] = "全部"
+                        st.rerun()
                 with cols[1]:
-                    model = st.text_input("机型", value=group['filters']['model'], key=f"group_model_{i}")
-                    group['filters']['model'] = model
+                    # 根据当前查询类型获取机型选项
+                    if group['query_type'] == "亮度数据":
+                        model_options = get_available_models_for_luminance()
+                    else:
+                        model_options = get_available_models_for_thermal()
+                    # 确保当前选中的值在选项中，否则设为"全部"
+                    current_model = group['filters'].get('model', '全部')
+                    if current_model not in model_options:
+                        current_model = "全部"
+                        group['filters']['model'] = "全部"
+                    selected_model = st.selectbox(
+                        "机型",
+                        options=model_options,
+                        index=model_options.index(current_model),
+                        key=f"group_model_{i}"
+                    )
+                    group['filters']['model'] = selected_model
                 with cols[2]:
                     stage = st.selectbox("阶段", ["全部"] + STAGE_OPTIONS, index=0 if group['filters']['stage'] == "全部" else STAGE_OPTIONS.index(group['filters']['stage'])+1, key=f"group_stage_{i}")
                     group['filters']['stage'] = stage
@@ -536,7 +580,7 @@ def main():
                             st.session_state.group_results[f"result_{i}"] = pd.DataFrame()
                         else:
                             mask = pd.Series([True] * len(df_all))
-                            if filters['model']:
+                            if filters['model'] != "全部":
                                 mask &= df_all['机型'].str.contains(filters['model'], case=False, na=False)
                             if filters['stage'] != "全部":
                                 mask &= df_all['阶段'] == filters['stage']
@@ -556,7 +600,7 @@ def main():
                             st.session_state.group_results[f"result_{i}"] = pd.DataFrame()
                         else:
                             mask = pd.Series([True] * len(df_thermal))
-                            if filters['model']:
+                            if filters['model'] != "全部":
                                 mask &= df_thermal['机型'].str.contains(filters['model'], case=False, na=False)
                             if filters['stage'] != "全部":
                                 mask &= df_thermal['阶段'] == filters['stage']
