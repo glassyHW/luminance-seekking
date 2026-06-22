@@ -26,10 +26,10 @@ SOURCE_OPTIONS = ["研发测试", "产线测试", "认证机构", "理论评估"
 EVALUATION_OBJECTS = ["光机", "整机"]
 COMMON_FIELDS = ["亮度", "色点x", "色点y", "色温", "Duv", "SSI", "灯温", "duty", "对比度", "色域"]
 ACTUAL_EXTRA_FIELDS = ["照度计编号", "整机SN", "版本-固件", "版本-image", "环境温度"]
-THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注"]
+THEORY_EXTRA_FIELDS = ["评估对象", "照度计型号", "备注", "光机AC功耗"]
 
 THERMAL_FIELDS = [
-    "机型", "阶段", "模式", "光机功耗", "整机功耗", "环境温度", "风扇转速",
+    "机型", "阶段", "模式", "光机功耗", "整机AC功耗", "整机DC功耗", "环境温度", "风扇转速",
     "灯温", "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
     "DMD电功耗", "DMD总功耗", "DMD spec", "DMD-TP1", "DMD余量"
 ]
@@ -110,7 +110,12 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
             df = df.replace(['', 'nan', 'None'], None)
 
             if worksheet_name == WORKSHEET_THERMAL:
-                numeric_fields = ["光机功耗", "整机功耗", "环境温度", "风扇转速", "灯温",
+                # 兼容旧列名
+                if "整机功耗" in df.columns and "整机AC功耗" not in df.columns:
+                    df = df.rename(columns={"整机功耗": "整机AC功耗"})
+                if "整机DC功耗" not in df.columns:
+                    df["整机DC功耗"] = None
+                numeric_fields = ["光机功耗", "整机AC功耗", "整机DC功耗", "环境温度", "风扇转速", "灯温",
                                   "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
                                   "DMD电功耗", "DMD总功耗", "DMD余量"]
                 for col in numeric_fields:
@@ -128,7 +133,7 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
                     save_data_to_sheet(df, worksheet_name)
 
             if add_missing_cols and worksheet_name == WORKSHEET_THEORY:
-                for col in ["评估对象", "照度计型号", "备注"]:
+                for col in THEORY_EXTRA_FIELDS:
                     if col not in df.columns:
                         df[col] = None
 
@@ -161,7 +166,7 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
         cols_to_drop = [c for c in UNWANTED_THEORY_COLS if c in df.columns]
         if cols_to_drop:
             df = df.drop(columns=cols_to_drop)
-        for col in ["评估对象", "照度计型号", "备注"]:
+        for col in THEORY_EXTRA_FIELDS:
             if col not in df.columns:
                 df[col] = None
     if worksheet_name == WORKSHEET_ACTUAL:
@@ -243,12 +248,24 @@ def init_sheets():
     ensure_worksheet_exists(WORKSHEET_OPTICS, [])
     load_mode_options()
     df_theory = load_theory_data()
-    if "评估对象" not in df_theory.columns or "照度计型号" not in df_theory.columns or "备注" not in df_theory.columns:
+    need_save = False
+    for col in THEORY_EXTRA_FIELDS:
+        if col not in df_theory.columns:
+            df_theory[col] = None
+            need_save = True
+    if need_save:
         save_theory_data(df_theory)
     df_actual = load_actual_data()
     if "环境温度" not in df_actual.columns:
         df_actual["环境温度"] = None
         save_actual_data(df_actual)
+    # 修复散热数据表，确保新列存在并迁移旧列
+    df_thermal = load_thermal_data()
+    if "整机功耗" in df_thermal.columns and "整机AC功耗" not in df_thermal.columns:
+        df_thermal = df_thermal.rename(columns={"整机功耗": "整机AC功耗"})
+    if "整机DC功耗" not in df_thermal.columns:
+        df_thermal["整机DC功耗"] = None
+    save_thermal_data(df_thermal)
 
 @st.cache_data(ttl=300)
 def load_actual_data():
@@ -346,12 +363,15 @@ def process_thermal_uploaded_file(uploaded_file):
         if missing:
             st.error(f"文件缺少必要列: {missing}")
             return None, False
+        # 兼容旧字段
+        if "整机功耗" in df.columns and "整机AC功耗" not in df.columns:
+            df = df.rename(columns={"整机功耗": "整机AC功耗"})
         for col in THERMAL_FIELDS:
             if col not in df.columns:
                 df[col] = None
         df = df[THERMAL_FIELDS]
         df = df.replace(['nan', 'None', ''], None)
-        numeric_fields = ["光机功耗", "整机功耗", "环境温度", "风扇转速", "灯温",
+        numeric_fields = ["光机功耗", "整机AC功耗", "整机DC功耗", "环境温度", "风扇转速", "灯温",
                           "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
                           "DMD电功耗", "DMD总功耗", "DMD余量"]
         for col in numeric_fields:
@@ -362,10 +382,9 @@ def process_thermal_uploaded_file(uploaded_file):
         st.error(f"文件解析失败: {e}")
         return None, False
 
-# ================== 获取机型选项（带缓存） ==================
+# ================== 获取机型选项 ==================
 @st.cache_data(ttl=300)
 def get_available_models_for_luminance():
-    """获取亮度数据（实测+理论）中的所有机型"""
     df_actual = load_actual_data()
     df_theory = load_theory_data()
     models = set()
@@ -377,7 +396,6 @@ def get_available_models_for_luminance():
 
 @st.cache_data(ttl=300)
 def get_available_models_for_thermal():
-    """获取散热数据中的所有机型"""
     df_thermal = load_thermal_data()
     if df_thermal.empty or '机型' not in df_thermal.columns:
         return ["全部"]
@@ -452,7 +470,6 @@ def init_session_state():
             g['query_type'] = "亮度数据"
         if 'filters' not in g:
             g['filters'] = {"model": "全部", "stage": "全部", "mode": "全部", "source": "全部"}
-        # 确保 model 字段存在且不为空字符串（兼容旧数据）
         if 'model' not in g['filters'] or g['filters']['model'] == "":
             g['filters']['model'] = "全部"
     if 'actual_authenticated' not in st.session_state:
@@ -492,12 +509,12 @@ def main():
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "【查询】数据分析",
         "【录入】实测数据",
-        "【录入】理论数据",
+        "【录入光机理论数据】",
         "【录入】散热数据",
         "【查询】光机信息"
     ])
 
-    # -------------------- 数据分析查询（多组独立，机型改为下拉选择） --------------------
+    # -------------------- 数据分析查询（多组独立） --------------------
     with tab1:
         st.header("数据查询与分析")
         with st.expander("筛选组管理", expanded=True):
@@ -522,16 +539,13 @@ def main():
                     )
                     if new_query_type != group['query_type']:
                         group['query_type'] = new_query_type
-                        # 切换类型时重置机型选项为"全部"
                         group['filters']['model'] = "全部"
                         st.rerun()
                 with cols[1]:
-                    # 根据当前查询类型获取机型选项
                     if group['query_type'] == "亮度数据":
                         model_options = get_available_models_for_luminance()
                     else:
                         model_options = get_available_models_for_thermal()
-                    # 确保当前选中的值在选项中，否则设为"全部"
                     current_model = group['filters'].get('model', '全部')
                     if current_model not in model_options:
                         current_model = "全部"
@@ -556,7 +570,6 @@ def main():
                 with cols[4]:
                     if st.button("删除", key=f"del_group_{i}"):
                         st.session_state.filter_groups.pop(i)
-                        # 清理存储
                         keys_to_del = [k for k in st.session_state.group_results.keys() if k.endswith(f"_{i}") or k == f"result_{i}"]
                         for k in keys_to_del:
                             del st.session_state.group_results[k]
@@ -565,22 +578,7 @@ def main():
                         st.rerun()
                 
                 if group['query_type'] == "亮度数据":
-                    # ================== 修复点：安全处理数据来源下拉框的索引 ==================
-                    source_options = ["全部"] + SOURCE_OPTIONS
-                    current_source = group['filters'].get('source', '全部')
-                    # 如果当前值不在 source_options 中，默认选“全部”
-                    try:
-                        source_idx = source_options.index(current_source)
-                    except ValueError:
-                        source_idx = 0
-                        # 修复存储的非法值（可选，避免下次再出错）
-                        group['filters']['source'] = "全部"
-                    source = st.selectbox(
-                        "数据来源",
-                        source_options,
-                        index=source_idx,
-                        key=f"group_source_{i}"
-                    )
+                    source = st.selectbox("数据来源", ["全部"] + SOURCE_OPTIONS, index=0 if group['filters'].get('source', '全部') == "全部" else SOURCE_OPTIONS.index(group['filters'].get('source', '全部'))+1, key=f"group_source_{i}")
                     group['filters']['source'] = source
                 else:
                     group['filters']['source'] = None
@@ -596,7 +594,8 @@ def main():
                         else:
                             mask = pd.Series([True] * len(df_all))
                             if filters['model'] != "全部":
-                                mask &= df_all['机型'].str.contains(filters['model'], case=False, na=False)
+                                # 使用 regex=False 避免特殊字符被当作正则
+                                mask &= df_all['机型'].str.contains(filters['model'], case=False, na=False, regex=False)
                             if filters['stage'] != "全部":
                                 mask &= df_all['阶段'] == filters['stage']
                             if filters['mode'] != "全部":
@@ -616,7 +615,8 @@ def main():
                         else:
                             mask = pd.Series([True] * len(df_thermal))
                             if filters['model'] != "全部":
-                                mask &= df_thermal['机型'].str.contains(filters['model'], case=False, na=False)
+                                # 使用 regex=False 避免特殊字符被当作正则
+                                mask &= df_thermal['机型'].str.contains(filters['model'], case=False, na=False, regex=False)
                             if filters['stage'] != "全部":
                                 mask &= df_thermal['阶段'] == filters['stage']
                             if filters['mode'] != "全部":
@@ -629,7 +629,6 @@ def main():
                                 st.session_state.group_results[f"result_{i}"] = final
                 st.rerun()
         
-        # 显示每个组的查询结果
         for i, group in enumerate(st.session_state.filter_groups):
             result_key = f"result_{i}"
             if result_key in st.session_state.group_results:
@@ -821,15 +820,16 @@ def main():
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
                     save_actual_data(edited)
                     st.success("实测历史数据已更新")
+                    time.sleep(1.5)
                     st.rerun()
             else:
                 st.info("暂无实测历史数据")
 
-    # -------------------- 理论数据录入 --------------------
+    # -------------------- 光机理论数据录入 --------------------
     with tab3:
-        st.header("理论数据录入")
+        st.header("光机理论数据录入")
         if not st.session_state.theory_authenticated:
-            st.warning("请输入密码以查看和操作理论数据")
+            st.warning("请输入密码以查看和操作光机理论数据")
             with st.form("theory_auth_form"):
                 pwd = st.text_input("密码", type="password")
                 if st.form_submit_button("验证"):
@@ -865,8 +865,8 @@ def main():
                         st.session_state.show_add_mode_theory = False
                         st.rerun()
 
-            st.subheader("📁 批量导入理论数据")
-            uploaded_file_theory = st.file_uploader("上传 CSV 或 Excel 文件（表头需与理论数据格式一致）",
+            st.subheader("📁 批量导入光机理论数据")
+            uploaded_file_theory = st.file_uploader("上传 CSV 或 Excel 文件（表头需与光机理论数据格式一致）",
                                                     type=['csv', 'xlsx', 'xls'], key="theory_uploader")
             if uploaded_file_theory is not None:
                 expected_headers = ['机型', '阶段', '模式', '数据来源', '实测/理论'] + COMMON_FIELDS + THEORY_EXTRA_FIELDS
@@ -874,11 +874,11 @@ def main():
                 if success:
                     st.success(f"成功读取 {len(df_upload)} 条记录")
                     st.dataframe(df_upload.head(10), width='stretch')
-                    if st.button("确认追加到理论数据", key="confirm_theory_upload"):
+                    if st.button("确认追加到光机理论数据", key="confirm_theory_upload"):
                         df_existing = load_theory_data()
                         df_new = pd.concat([df_existing, df_upload], ignore_index=True) if not df_existing.empty else df_upload
                         save_theory_data(df_new)
-                        st.success(f"已追加 {len(df_upload)} 条理论数据")
+                        st.success(f"已追加 {len(df_upload)} 条光机理论数据")
                         st.rerun()
 
             st.subheader("✍️ 手动录入单条数据")
@@ -893,7 +893,7 @@ def main():
                 with col4:
                     input_eval_obj = st.selectbox("评估对象", EVALUATION_OBJECTS, key="t_eval")
                 
-                st.info("📌 理论数据的数据来源固定为：理论评估")
+                st.info("📌 光机理论数据的数据来源固定为：理论评估")
                 st.subheader("2. 光学参数")
                 cols = st.columns(len(COMMON_FIELDS))
                 input_values = {}
@@ -903,14 +903,18 @@ def main():
                                                             placeholder="留空或填入数字/文字")
                 
                 st.subheader("3. 附加信息")
-                extra_cols = st.columns(len(THEORY_EXTRA_FIELDS))
+                extra_cols = st.columns(4)
                 input_extras = {}
                 with extra_cols[0]:
-                    input_extras["照度计型号"] = st.text_input("照度计型号", key="t_luxmeter")
+                    st.text_input("评估对象", value=input_eval_obj, disabled=True)
                 with extra_cols[1]:
+                    input_extras["照度计型号"] = st.text_input("照度计型号", key="t_luxmeter")
+                with extra_cols[2]:
                     input_extras["备注"] = st.text_input("备注", key="t_remark")
+                with extra_cols[3]:
+                    input_extras["光机AC功耗"] = st.text_input("光机AC功耗", key="t_ac_power", placeholder="留空或填入数字/文字")
 
-                if st.form_submit_button("保存理论数据"):
+                if st.form_submit_button("保存光机理论数据"):
                     converted = {f: safe_float_convert(input_values[f]) for f in COMMON_FIELDS}
                     new_row = {
                         "机型": input_model,
@@ -920,8 +924,9 @@ def main():
                         "实测/理论": "理论",
                         **converted,
                         "评估对象": input_eval_obj,
-                        "照度计型号": input_extras["照度计型号"],
-                        "备注": input_extras["备注"]
+                        "照度计型号": input_extras.get("照度计型号", ""),
+                        "备注": input_extras.get("备注", ""),
+                        "光机AC功耗": input_extras.get("光机AC功耗", "")
                     }
                     df = load_theory_data()
                     if df.empty:
@@ -932,38 +937,39 @@ def main():
                                 df[k] = ""
                         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                     save_theory_data(df)
-                    st.success("✅ 理论数据保存成功！")
+                    st.success("✅ 光机理论数据保存成功！")
                     st.rerun()
 
             st.markdown("---")
-            st.subheader("📜 理论历史数据管理")
+            st.subheader("📜 光机理论历史数据管理")
             col_refresh, _ = st.columns([1, 5])
             with col_refresh:
-                if st.button("🔄 刷新理论数据", key="refresh_theory"):
+                if st.button("🔄 刷新光机理论数据", key="refresh_theory"):
                     st.cache_data.clear()
                     st.rerun()
             df_theory = load_theory_data()
             if not df_theory.empty:
                 display_df = format_dataframe_for_display(df_theory, COMMON_FIELDS)
                 edited = st.data_editor(display_df, num_rows="dynamic", key="edit_theory", width='stretch')
-                if st.button("💾 保存理论表格修改"):
+                if st.button("💾 保存光机理论表格修改"):
                     for col in COMMON_FIELDS:
                         if col in edited:
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
-                    for col in ["评估对象", "照度计型号", "备注"]:
+                    for col in THEORY_EXTRA_FIELDS:
                         if col not in edited.columns:
                             edited[col] = None
                     edited['数据来源'] = '理论评估'
                     save_theory_data(edited)
-                    st.success("理论历史数据已更新")
+                    st.success("光机理论历史数据已更新")
+                    time.sleep(1.5)
                     st.rerun()
             else:
-                st.info("暂无理论历史数据")
+                st.info("暂无光机理论历史数据")
                 with st.expander("💡 数据不显示怎么办？"):
                     st.markdown("""
-                    - 请检查 Google Sheets 中的「理论数据」工作表，确保表头包含：机型、阶段、模式、数据来源、实测/理论、亮度、色点x、...、评估对象、照度计型号、备注。
+                    - 请检查 Google Sheets 中的「理论数据」工作表，确保表头包含：机型、阶段、模式、数据来源、实测/理论、亮度、色点x、...、评估对象、照度计型号、备注、光机AC功耗。
                     - 如果表头不匹配，可以删除该工作表（先备份数据），程序会自动重建。
-                    - 点击上方的「刷新理论数据」按钮清除缓存。
+                    - 点击上方的「刷新光机理论数据」按钮清除缓存。
                     """)
 
     # -------------------- 散热数据录入 --------------------
@@ -1039,9 +1045,21 @@ def main():
                 
                 st.subheader("散热参数")
                 thermal_param_fields = [
-                    "光机功耗", "整机功耗", "环境温度", "风扇转速", "灯温",
-                    "DMD光功率", "DMD overfill占比", "DMD吸收系数", "DMD光-热功耗",
-                    "DMD电功耗", "DMD总功耗", "DMD spec", "DMD-TP1", "DMD余量"
+                    "光机功耗", 
+                    "整机AC功耗", 
+                    "整机DC功耗", 
+                    "环境温度", 
+                    "风扇转速", 
+                    "灯温",
+                    "DMD光功率", 
+                    "DMD overfill占比", 
+                    "DMD吸收系数", 
+                    "DMD光-热功耗",
+                    "DMD电功耗", 
+                    "DMD总功耗", 
+                    "DMD spec", 
+                    "DMD-TP1", 
+                    "DMD余量"
                 ]
                 cols = st.columns(2)
                 input_values = {}
@@ -1091,6 +1109,7 @@ def main():
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
                     save_thermal_data(edited)
                     st.success("散热历史数据已更新")
+                    time.sleep(1.5)
                     st.rerun()
             else:
                 st.info("暂无散热历史数据")
