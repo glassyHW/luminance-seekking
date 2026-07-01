@@ -93,7 +93,7 @@ def ensure_worksheet_exists(sheet_title, headers):
             ws.update([[""]])
         return ws
 
-# ================== 数据读写（带重试） ==================
+# ================== 数据读写（带重试 + 针对性缓存清除） ==================
 def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing_cols=True, default_headers=None, max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -110,7 +110,6 @@ def load_data_from_sheet(worksheet_name, remove_unwanted_cols=False, add_missing
             df = df.replace(['', 'nan', 'None'], None)
 
             if worksheet_name == WORKSHEET_THERMAL:
-                # 兼容旧列名
                 if "整机功耗" in df.columns and "整机AC功耗" not in df.columns:
                     df = df.rename(columns={"整机功耗": "整机AC功耗"})
                 if "整机DC功耗" not in df.columns:
@@ -189,6 +188,19 @@ def save_data_to_sheet(df, worksheet_name, max_retries=3):
                     ws.update([df.columns.tolist()])
                 else:
                     ws.update([[""]])
+            # 写入成功后，清除对应的缓存
+            if worksheet_name == WORKSHEET_ACTUAL:
+                load_actual_data.clear()
+                get_available_models_for_luminance.clear()
+            elif worksheet_name == WORKSHEET_THEORY:
+                load_theory_data.clear()
+                get_available_models_for_luminance.clear()
+            elif worksheet_name == WORKSHEET_THERMAL:
+                load_thermal_data.clear()
+                get_available_models_for_thermal.clear()
+            elif worksheet_name == WORKSHEET_OPTICS:
+                load_optics_data.clear()
+            # 注意：模式配置和机型列表缓存仅依赖数据表，已在上方清除
             return
         except gspread.exceptions.APIError as e:
             if "429" in str(e) and attempt < max_retries - 1:
@@ -234,7 +246,7 @@ def add_new_mode(mode_name):
         return False
     ws = get_worksheet(WORKSHEET_MODES)
     ws.append_row([mode_name])
-    st.cache_data.clear()
+    st.cache_data.clear()  # 清除所有缓存（模式变化影响所有下拉框）
     return True
 
 # ================== 业务函数 ==================
@@ -259,7 +271,7 @@ def init_sheets():
     if "环境温度" not in df_actual.columns:
         df_actual["环境温度"] = None
         save_actual_data(df_actual)
-    # 修复散热数据表，确保新列存在并迁移旧列
+    # 修复散热数据表
     df_thermal = load_thermal_data()
     if "整机功耗" in df_thermal.columns and "整机AC功耗" not in df_thermal.columns:
         df_thermal = df_thermal.rename(columns={"整机功耗": "整机AC功耗"})
@@ -363,7 +375,6 @@ def process_thermal_uploaded_file(uploaded_file):
         if missing:
             st.error(f"文件缺少必要列: {missing}")
             return None, False
-        # 兼容旧字段
         if "整机功耗" in df.columns and "整机AC功耗" not in df.columns:
             df = df.rename(columns={"整机功耗": "整机AC功耗"})
         for col in THERMAL_FIELDS:
@@ -382,7 +393,7 @@ def process_thermal_uploaded_file(uploaded_file):
         st.error(f"文件解析失败: {e}")
         return None, False
 
-# ================== 获取机型选项 ==================
+# ================== 获取机型选项（带缓存） ==================
 @st.cache_data(ttl=300)
 def get_available_models_for_luminance():
     df_actual = load_actual_data()
@@ -514,7 +525,7 @@ def main():
         "【查询】光机信息"
     ])
 
-    # -------------------- 数据分析查询（多组独立） --------------------
+    # -------------------- 数据分析查询 --------------------
     with tab1:
         st.header("数据查询与分析")
         with st.expander("筛选组管理", expanded=True):
@@ -594,7 +605,6 @@ def main():
                         else:
                             mask = pd.Series([True] * len(df_all))
                             if filters['model'] != "全部":
-                                # 使用 regex=False 避免特殊字符被当作正则
                                 mask &= df_all['机型'].str.contains(filters['model'], case=False, na=False, regex=False)
                             if filters['stage'] != "全部":
                                 mask &= df_all['阶段'] == filters['stage']
@@ -615,7 +625,6 @@ def main():
                         else:
                             mask = pd.Series([True] * len(df_thermal))
                             if filters['model'] != "全部":
-                                # 使用 regex=False 避免特殊字符被当作正则
                                 mask &= df_thermal['机型'].str.contains(filters['model'], case=False, na=False, regex=False)
                             if filters['stage'] != "全部":
                                 mask &= df_thermal['阶段'] == filters['stage']
@@ -820,7 +829,7 @@ def main():
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
                     save_actual_data(edited)
                     st.success("实测历史数据已更新")
-                    time.sleep(1.5)
+                    time.sleep(0.5)  # 短暂等待确保写入完成
                     st.rerun()
             else:
                 st.info("暂无实测历史数据")
@@ -961,7 +970,7 @@ def main():
                     edited['数据来源'] = '理论评估'
                     save_theory_data(edited)
                     st.success("光机理论历史数据已更新")
-                    time.sleep(1.5)
+                    time.sleep(0.5)
                     st.rerun()
             else:
                 st.info("暂无光机理论历史数据")
@@ -1109,7 +1118,7 @@ def main():
                             edited[col] = edited[col].apply(lambda x: safe_float_convert(x) if isinstance(x, str) else x)
                     save_thermal_data(edited)
                     st.success("散热历史数据已更新")
-                    time.sleep(1.5)
+                    time.sleep(0.5)
                     st.rerun()
             else:
                 st.info("暂无散热历史数据")
